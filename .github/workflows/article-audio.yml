@@ -14,6 +14,9 @@ on:
       max_minutes:
         description: "Stop starting new stories after this many minutes"
         default: "150"
+      workers:
+        description: "Parallel jobs, each reading a share of the stories (use 4-8 for a backfill)"
+        default: "1"
   repository_dispatch:
     types: [article-audio]
 
@@ -25,31 +28,47 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  generate:
+  # Cheap check first: when nothing is waiting, the run ends here without installing anything.
+  check:
     if: github.event.schedule != '0 3 1 * *'
     runs-on: ubuntu-latest
+    outputs:
+      remaining: ${{ steps.check.outputs.remaining }}
+      shards: ${{ steps.check.outputs.shards }}
+    steps:
+      - name: Check for stories without audio
+        id: check
+        env:
+          TWK_AUTOMATION_URL: ${{ secrets.TWK_AUTOMATION_URL }}
+          AUTOMATION_INGEST_SECRET: ${{ secrets.AUTOMATION_INGEST_SECRET }}
+          WORKERS: ${{ github.event.inputs.workers || '1' }}
+        run: |
+          remaining=$(curl -fsS --retry 3 \
+            -H "Authorization: Bearer $AUTOMATION_INGEST_SECRET" \
+            "$TWK_AUTOMATION_URL/api/automation/audio?limit=0&voice=bf_emma" | jq -r '.remaining')
+          echo "Stories waiting for audio: $remaining"
+          workers=$(( WORKERS < 1 ? 1 : (WORKERS > 12 ? 12 : WORKERS) ))
+          echo "remaining=$remaining" >> "$GITHUB_OUTPUT"
+          echo "shards=$(jq -cn --argjson n "$workers" '[range(0; $n)] | map({index: ., count: $n})')" >> "$GITHUB_OUTPUT"
+
+  generate:
+    needs: check
+    if: needs.check.outputs.remaining != '0'
+    runs-on: ubuntu-latest
     timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: ${{ fromJSON(needs.check.outputs.shards) }}
     env:
       TWK_AUTOMATION_URL: ${{ secrets.TWK_AUTOMATION_URL }}
       AUTOMATION_INGEST_SECRET: ${{ secrets.AUTOMATION_INGEST_SECRET }}
       TWK_AUDIO_VOICE: bf_emma
       KOKORO_CACHE_DIR: ${{ github.workspace }}/.cache/models
     steps:
-      # Cheap check first: when nothing is waiting, the run ends here without installing anything.
-      - name: Check for stories without audio
-        id: check
-        run: |
-          remaining=$(curl -fsS --retry 3 \
-            -H "Authorization: Bearer $AUTOMATION_INGEST_SECRET" \
-            "$TWK_AUTOMATION_URL/api/automation/audio?limit=0&voice=$TWK_AUDIO_VOICE" | jq -r '.remaining')
-          echo "Stories waiting for audio: $remaining"
-          echo "remaining=$remaining" >> "$GITHUB_OUTPUT"
-
       - uses: actions/checkout@v4
-        if: steps.check.outputs.remaining != '0'
 
       - uses: actions/setup-node@v4
-        if: steps.check.outputs.remaining != '0'
         with:
           node-version: 22
 
@@ -57,27 +76,25 @@ jobs:
       # so a run starts reading in seconds instead of downloading for minutes.
       - name: Restore dependencies
         id: deps
-        if: steps.check.outputs.remaining != '0'
         uses: actions/cache@v4
         with:
           path: node_modules
           key: audio-node-${{ runner.os }}-node22-${{ hashFiles('package-lock.json') }}
 
       - name: Install dependencies
-        if: steps.check.outputs.remaining != '0' && steps.deps.outputs.cache-hit != 'true'
+        if: steps.deps.outputs.cache-hit != 'true'
         run: npm ci --no-audit --no-fund
 
       - name: Restore Kokoro model
-        if: steps.check.outputs.remaining != '0'
         uses: actions/cache@v4
         with:
           path: .cache/models
           key: kokoro-82m-v1.0-onnx-fp32
 
       - name: Read stories aloud
-        if: steps.check.outputs.remaining != '0'
         run: |
           node generate.mjs \
+            --shard "${{ matrix.shard.index }}/${{ matrix.shard.count }}" \
             --limit "${{ github.event.inputs.limit || '200' }}" \
             --max-minutes "${{ github.event.inputs.max_minutes || '150' }}"
 
