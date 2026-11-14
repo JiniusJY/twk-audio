@@ -1,0 +1,13 @@
+{
+  "name": "twk-article-audio",
+  "private": true,
+  "type": "module",
+  "description": "Generates Listen audio for TechWhoKnows articles with Kokoro.",
+  "scripts": {
+    "generate": "node generate.mjs"
+  },
+  "dependencies": {
+    "ffmpeg-static": "^5.2.0",
+    "kokoro-js": "^1.2.1"
+  }
+}

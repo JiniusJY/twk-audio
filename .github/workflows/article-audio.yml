@@ -1,0 +1,94 @@
+name: Article audio
+
+# Reads new TechWhoKnows stories aloud with Kokoro and uploads the MP3s (generate.mjs).
+# Public repo, so standard runners are free. Hourly, so audio follows a story within the hour.
+on:
+  schedule:
+    - cron: "20 * * * *"
+    - cron: "0 3 1 * *" # monthly keep-alive (see the keepalive job)
+  workflow_dispatch:
+    inputs:
+      limit:
+        description: "Most stories to read this run"
+        default: "200"
+      max_minutes:
+        description: "Stop starting new stories after this many minutes"
+        default: "150"
+  repository_dispatch:
+    types: [article-audio]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: article-audio
+  cancel-in-progress: false
+
+jobs:
+  generate:
+    if: github.event.schedule != '0 3 1 * *'
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    env:
+      TWK_AUTOMATION_URL: ${{ secrets.TWK_AUTOMATION_URL }}
+      AUTOMATION_INGEST_SECRET: ${{ secrets.AUTOMATION_INGEST_SECRET }}
+      TWK_AUDIO_VOICE: bf_emma
+      KOKORO_CACHE_DIR: ${{ github.workspace }}/.cache/models
+    steps:
+      # Cheap check first: when nothing is waiting, the run ends here without installing anything.
+      - name: Check for stories without audio
+        id: check
+        run: |
+          remaining=$(curl -fsS --retry 3 \
+            -H "Authorization: Bearer $AUTOMATION_INGEST_SECRET" \
+            "$TWK_AUTOMATION_URL/api/automation/audio?limit=0&voice=$TWK_AUDIO_VOICE" | jq -r '.remaining')
+          echo "Stories waiting for audio: $remaining"
+          echo "remaining=$remaining" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@v4
+        if: steps.check.outputs.remaining != '0'
+
+      - uses: actions/setup-node@v4
+        if: steps.check.outputs.remaining != '0'
+        with:
+          node-version: 22
+
+      # node_modules (onnxruntime + ffmpeg binary) and the ~330 MB model come from cache,
+      # so a run starts reading in seconds instead of downloading for minutes.
+      - name: Restore dependencies
+        id: deps
+        if: steps.check.outputs.remaining != '0'
+        uses: actions/cache@v4
+        with:
+          path: node_modules
+          key: audio-node-${{ runner.os }}-node22-${{ hashFiles('package-lock.json') }}
+
+      - name: Install dependencies
+        if: steps.check.outputs.remaining != '0' && steps.deps.outputs.cache-hit != 'true'
+        run: npm ci --no-audit --no-fund
+
+      - name: Restore Kokoro model
+        if: steps.check.outputs.remaining != '0'
+        uses: actions/cache@v4
+        with:
+          path: .cache/models
+          key: kokoro-82m-v1.0-onnx-fp32
+
+      - name: Read stories aloud
+        if: steps.check.outputs.remaining != '0'
+        run: |
+          node generate.mjs \
+            --limit "${{ github.event.inputs.limit || '200' }}" \
+            --max-minutes "${{ github.event.inputs.max_minutes || '150' }}"
+
+  # GitHub switches off scheduled workflows in public repos after 60 days without a commit.
+  # Re-enabling this workflow once a month through the API keeps the hourly schedule alive.
+  keepalive:
+    if: github.event.schedule == '0 3 1 * *'
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+    steps:
+      - run: gh api -X PUT "repos/$GITHUB_REPOSITORY/actions/workflows/article-audio.yml/enable"
+        env:
+          GH_TOKEN: ${{ github.token }}
