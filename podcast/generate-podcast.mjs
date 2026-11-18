@@ -46,13 +46,13 @@ const KOKORO_MODEL_ID = "onnx-community/Kokoro-82M-v1.0-ONNX";
 
 const DEFAULT_VOICES = {
   A: {
-    name: "Jade",
+    name: "Jade Chen",
     role: "Lead Tech Editor",
     fishId: process.env.FISH_VOICE_A || "6ab4c6b0f37f4243a99046478647be94",
     kokoroId: process.env.KOKORO_VOICE_A || "bf_emma",
   },
   B: {
-    name: "Alok",
+    name: "Alok Nair",
     role: "Systems & Infrastructure Analyst",
     fishId: process.env.FISH_VOICE_B || "83fa5723578744f5898f96b83582ece0",
     kokoroId: process.env.KOKORO_VOICE_B || "bm_george",
