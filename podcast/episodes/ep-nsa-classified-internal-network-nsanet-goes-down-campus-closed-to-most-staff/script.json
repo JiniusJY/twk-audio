@@ -1,0 +1,142 @@
+{
+  "slug": "ep-nsa-classified-internal-network-nsanet-goes-down-campus-closed-to-most-staff",
+  "episodeNumber": 1,
+  "title": "Episode 1: NSA's PHP Problem: When Classified Networks Go Offline",
+  "description": "NSANet went dark and forced Fort Meade into code orange after a botched PHP patch. Jade and Alok argue over whether 'network of networks' redundancy actually held up or if legacy infrastructure is just high-stakes Jenga.",
+  "publishedAt": "2026-11-18T13:09:10.142Z",
+  "sources": [
+    {
+      "id": "src-1",
+      "title": "NSA Classified Internal Network NSANet Goes Down, Campus Closed to Most Staff",
+      "url": "https://techwhoknows.com/security/nsa-classified-internal-network-nsanet-goes-down-campus-closed-to-most-staff"
+    }
+  ],
+  "turns": [
+    {
+      "speaker": "A",
+      "chapter": "01. Code Orange at Fort Meade",
+      "text": "Alok, quick question. What do the National Security Agency and your old college WordPress blog have in common?",
+      "ttsText": "Alok, quick question. What do the National Security Agency and your old college WordPress blog have in common?",
+      "citations": ["src-1"]
+    },
+    {
+      "speaker": "B",
+      "text": "Wait, [chuckle] please don't tell me they both went down because someone forgot to renew a domain.",
+      "citations": []
+    },
+    {
+      "speaker": "A",
+      "text": "Close. NSANet, the NSA's classified internal network, went down and forced their Fort Meade campus to 'code orange', basically closed to most staff.",
+      "ttsText": "Close. N S A Net, the N S A's classified internal network, went down and forced their Fort Meade campus to 'code orange', basically closed to most staff.",
+      "citations": ["src-1"]
+    },
+    {
+      "speaker": "B",
+      "text": "[surprised] Hold on. Closed the campus? And what was the official line, 'scheduled maintenance'?",
+      "citations": []
+    },
+    {
+      "speaker": "A",
+      "text": "'Temporary degradation during scheduled routine maintenance.'",
+      "citations": ["src-1"]
+    },
+    {
+      "speaker": "B",
+      "text": "[laughing] 'Temporary degradation.' That's what I tell my wife when I brick the home router flashing custom firmware. What actually broke it?",
+      "citations": []
+    },
+    {
+      "speaker": "A",
+      "chapter": "02. The PHP Patch Scramble",
+      "text": "A software patch. Specifically, a patch for major PHP vulnerabilities discovered last month.",
+      "ttsText": "A software patch. Specifically, a patch for major P H P vulnerabilities discovered last month.",
+      "citations": ["src-1"]
+    },
+    {
+      "speaker": "B",
+      "text": "Wait, no. [chuckle] You're telling me top-secret intelligence infrastructure is running on PHP?",
+      "ttsText": "Wait, no. [chuckle] You're telling me top-secret intelligence infrastructure is running on P H P?",
+      "citations": []
+    },
+    {
+      "speaker": "A",
+      "text": "I mean, half the enterprise web still runs on PHP under the hood, why are you acting shocked?",
+      "ttsText": "I mean, half the enterprise web still runs on P H P under the hood, why are you acting shocked?",
+      "citations": []
+    },
+    {
+      "speaker": "B",
+      "text": "Because it's the NSA! You'd think air-gapped classified tooling wouldn't be one bad PHP update away from locking the doors.",
+      "ttsText": "Because it's the N S A! You'd think air-gapped classified tooling wouldn't be one bad P H P update away from locking the doors.",
+      "citations": []
+    },
+    {
+      "speaker": "A",
+      "text": "Well, AI tools helped researchers turn those flaws into working exploits fast, so everyone scrambled to patch. Director of National Intelligence Jay Clayton literally admitted the patching caused systems not to come back up as expected.",
+      "ttsText": "Well, A I tools helped researchers turn those flaws into working exploits fast, so everyone scrambled to patch. Director of National Intelligence Jay Clayton literally admitted the patching caused systems not to come back up as expected.",
+      "citations": ["src-1"]
+    },
+    {
+      "speaker": "B",
+      "text": "Right, so you rush the patch because AI is weaponising the bug, and the patch itself takes the network down. Damned if you do, damned if you don't.",
+      "ttsText": "Right, so you rush the patch because A I is weaponising the bug, and the patch itself takes the network down. Damned if you do, damned if you don't.",
+      "citations": []
+    },
+    {
+      "speaker": "A",
+      "chapter": "03. Did Redundancy Actually Hold?",
+      "text": "Okay, devil's advocate though. An ex-senior NSA official told CNN that NSANet is a 'network of networks' with heavy redundancy, and that Five Eyes wasn't affected. Maybe the core mission stayed up?",
+      "ttsText": "Okay, devil's advocate though. An ex-senior N S A official told C N N that N S A Net is a 'network of networks' with heavy redundancy, and that Five Eyes wasn't affected. Maybe the core mission stayed up?",
+      "citations": ["src-1"]
+    },
+    {
+      "speaker": "B",
+      "text": "Jade, come on. You're letting them off way too easy here. If you send most of Fort Meade home on code orange, things are not 'humming along.'",
+      "citations": []
+    },
+    {
+      "speaker": "A",
+      "text": "I'm not saying it was fine! I'm saying isolating the blast radius so Five Eyes stays online is literally what compartmentalisation is for.",
+      "citations": []
+    },
+    {
+      "speaker": "B",
+      "text": "Sure, for Five Eyes. For everyone else on base, their Monday morning was cancelled by a patch.",
+      "citations": []
+    },
+    {
+      "speaker": "A",
+      "chapter": "04. A Rough Week for Infrastructure",
+      "text": "And look at the timing. Hang on, let me check my notes on the rest of this week [sfx:notes] we had a nationwide FAA ground stop last Friday, a Microsoft 365 global outage, and Chase Bank issues. Nobody's linking them, to be clear.",
+      "ttsText": "And look at the timing. Hang on, let me check my notes on the rest of this week [sfx:notes] we had a nationwide F A A ground stop last Friday, a Microsoft 365 global outage, and Chase Bank issues. Nobody's linking them, to be clear.",
+      "citations": ["src-1"]
+    },
+    {
+      "speaker": "B",
+      "text": "They don't need to be linked to show the same pattern. Even across APAC, teams have been quietly scrambling on this exact PHP patch cycle.",
+      "ttsText": "They don't need to be linked to show the same pattern. Even across A-Pac, teams have been quietly scrambling on this exact P H P patch cycle.",
+      "citations": []
+    },
+    {
+      "speaker": "A",
+      "text": "It's happened before too. In 2000, an NSA tech failure knocked their computers offline for nearly three days.",
+      "ttsText": "It's happened before too. In 2000, an N S A tech failure knocked their computers offline for nearly three days.",
+      "citations": ["src-1"]
+    },
+    {
+      "speaker": "B",
+      "text": "[sighing] Twenty-six years later and we're still playing high-stakes Jenga with legacy patches. Pull one block, hope the tower doesn't drop.",
+      "citations": []
+    },
+    {
+      "speaker": "A",
+      "text": "At least next time you brick your home router, Alok, just call it 'code orange.'",
+      "citations": []
+    },
+    {
+      "speaker": "B",
+      "text": "[laughing] Fair. 'Scheduled routine maintenance, honey, Five Eyes is unaffected.'",
+      "citations": []
+    }
+  ]
+}

@@ -54,7 +54,7 @@ const DEFAULT_VOICES = {
   B: {
     name: "Alok",
     role: "Systems & Infrastructure Analyst",
-    fishId: process.env.FISH_VOICE_B || "b7204d4e40ef4a548c7c8547b7f73492",
+    fishId: process.env.FISH_VOICE_B || "536d3a5e000945adb7038665781a4aca",
     kokoroId: process.env.KOKORO_VOICE_B || "bm_george",
   },
 };
@@ -116,6 +116,33 @@ function silence(seconds) {
   return new Float32Array(Math.round(SAMPLE_RATE * seconds));
 }
 
+/** Synthesises a subtle, realistic two-flick paper/note-flip sound effect at 24kHz. */
+function makeNoteFlipSfx() {
+  const durationS = 0.34;
+  const len = Math.round(SAMPLE_RATE * durationS);
+  const out = new Float32Array(len);
+  let hpPrev = 0;
+  let lpPrev = 0;
+  let seed = 1337;
+  const rand = () => {
+    seed = (seed * 1664525 + 1013904223) >>> 0;
+    return (seed / 0xffffffff) * 2 - 1;
+  };
+  for (let i = 0; i < len; i++) {
+    const t = i / SAMPLE_RATE;
+    // Two soft paper-rustle envelopes: initial lift (~0.02-0.12s) and page settle (~0.17-0.30s)
+    const env1 = t >= 0.01 && t <= 0.13 ? Math.sin(((t - 0.01) / 0.12) * Math.PI) * 0.7 : 0;
+    const env2 = t >= 0.16 && t <= 0.32 ? Math.sin(((t - 0.16) / 0.16) * Math.PI) : 0;
+    const white = rand();
+    // Band-pass shape (~1.2kHz-4.5kHz) for crisp paper texture without harsh hiss
+    lpPrev = lpPrev * 0.68 + white * 0.32;
+    const hp = lpPrev - hpPrev * 0.85;
+    hpPrev = lpPrev;
+    out[i] = hp * (env1 + env2) * 0.09;
+  }
+  return out;
+}
+
 function encodeWav(parts) {
   const total = parts.reduce((sum, p) => sum + p.length, 0);
   const buffer = Buffer.alloc(44 + total * 2);
@@ -148,6 +175,94 @@ function stripDeliveryTags(text) {
   return text.replace(/\[[^\]]{1,32}\]\s*/g, "").replace(/\s+/g, " ").trim();
 }
 
+const PRONUNCIATION_MAP = new Map([
+  ["pypi", "Pie P I"],
+  ["apac", "A-Pac"],
+  ["sqlite", "sequel-lite"],
+  ["sql", "sequel"],
+  ["postgresql", "Post-gres Q L"],
+  ["mysql", "My sequel"],
+  ["kubectl", "kube control"],
+  ["nginx", "engine X"],
+  ["oauth", "oh-auth"],
+  ["wi-fi", "why-fie"],
+  ["wifi", "why-fie"],
+  ["ios", "I O S"],
+  ["macos", "Mac O S"],
+  ["github", "Git Hub"],
+  ["gitlab", "Git Lab"],
+  ["nvme", "N V M e"],
+  ["saas", "sass"],
+  ["paas", "pass"],
+  ["iaas", "I-as"],
+  ["ciso", "see-so"],
+  ["latex", "lay-tech"],
+  ["gui", "gooey"],
+  ["json", "jayson"],
+  ["yaml", "yammel"],
+  ["regex", "redge-ex"],
+  ["devops", "dev-ops"],
+  ["finops", "fin-ops"],
+  ["openai", "Open A I"],
+  ["chatgpt", "Chat G P T"],
+  ["deepseek", "Deep Seek"],
+  ["graphql", "Graph Q L"],
+]);
+
+const SPELLED_ACRONYMS = new Set([
+  "NSA", "PHP", "API", "SDK", "CLI", "SSH", "TLS", "SSL", "DNS", "HTTP", "HTTPS",
+  "URL", "URI", "HTML", "CSS", "XML", "CSV", "PDF", "SQL", "FBI", "CIA", "SEC",
+  "MAS", "IMDA", "CSA", "AI", "ML", "LLM", "RAG", "MCP", "AWS", "GCP", "VPC",
+  "IAM", "MFA", "SSO", "VPN", "CVE", "RCE", "XSS", "CSRF", "CDN", "ISP", "B2B",
+  "B2C", "IPO", "VC", "ARR", "MRR", "ROI", "KPI", "CEO", "CTO", "CFO", "COO",
+  "GPU", "CPU", "TPU", "NPU", "USB", "RAM", "SSD", "HDD", "OS", "VM", "KVM",
+  "TCP", "UDP", "IP", "BGP", "ASN", "SOC", "SIEM", "EDR", "XDR",
+]);
+
+function spaceAcronym(word) {
+  return word.split("").join(" ");
+}
+
+/**
+ * Normalises technical acronyms, fused ALLCAPS+Word compounds (e.g. NSANet -> N S A Net),
+ * versions, and CVEs for natural TTS pronunciation while preserving [Fish tags].
+ */
+function normalizeForSpeech(rawText) {
+  const parts = String(rawText || "").split(/(\[[^\]]{1,32}\])/g);
+  return parts
+    .map((part) => {
+      if (/^\[sfx:[^\]]+\]$/i.test(part)) return "";
+      if (part.startsWith("[") && part.endsWith("]")) return part;
+      let out = part;
+      // CVE-2026-1234 -> C V E 2026, 1234
+      out = out.replace(/\bCVE-(\d{4})-(\d+)\b/gi, (_, y, n) => `C V E ${y}, ${n}`);
+      // Version numbers like v2.1 or v2.1.3 -> version 2 point 1
+      out = out.replace(/\bv(\d+(?:\.\d+)+)\b/gi, (_, v) => `version ${v.replace(/\./g, " point ")}`);
+      // Known tricky tech words (case-insensitive whole word)
+      out = out.replace(/\b[A-Za-z][A-Za-z0-9-]*\b/g, (token) => {
+        const mapped = PRONUNCIATION_MAP.get(token.toLowerCase());
+        if (mapped) return mapped;
+        // Fused ALLCAPS + TitleCase word: NSANet -> N S A Net, AWSLambda -> A W S Lambda
+        if (/^[A-Z]{2,}[A-Z][a-z]{2,}$/.test(token)) {
+          const split = token.replace(/^([A-Z]{2,})([A-Z][a-z]{2,})$/, (_, acr, rest) => `${spaceAcronym(acr)} ${rest}`);
+          return split;
+        }
+        // Fused Word + ALLCAPS suffix: FastAPI -> Fast A P I
+        if (/^[A-Z][a-z]{2,}[A-Z]{2,}$/.test(token)) {
+          return token.replace(/^([A-Z][a-z]{2,})([A-Z]{2,})$/, (_, head, acr) => `${head} ${spaceAcronym(acr)}`);
+        }
+        if (SPELLED_ACRONYMS.has(token)) {
+          return spaceAcronym(token);
+        }
+        return token;
+      });
+      return out;
+    })
+    .join("")
+    .replace(/\s{2,}/g, " ")
+    .trim();
+}
+
 async function synthFish(text, referenceId, model) {
   const apiKey = process.env.FISH_AUDIO_API_KEY;
   if (apiKey) {
@@ -163,7 +278,13 @@ async function synthFish(text, referenceId, model) {
         reference_id: referenceId,
         format: "mp3",
         mp3_bitrate: 128,
-        normalize: true,
+        temperature: 0.8,
+        top_p: 0.8,
+        prosody: {
+          speed: 1.0,
+          volume: 0,
+          normalize_loudness: true,
+        },
       }),
       signal: AbortSignal.timeout(45_000),
     });
@@ -355,25 +476,48 @@ async function main() {
         cursorSamples += gap.length;
       }
 
-      let samples;
-      if (activeProvider === "fish") {
-        try {
-          const mp3Buf = await synthFish(turn.text, voice.fishId, args["fish-model"]);
-          samples = await decodeAudioToFloat32(ffmpegPath, tmpDir, i, mp3Buf, "mp3");
-        } catch (err) {
-          if (args["auto-fallback"] && err.fallbackable) {
-            log(`Fish Audio unavailable (${err.message}); falling back to Kokoro-82M.`);
-            activeProvider = "kokoro";
-            samples = await synthKokoro(turn.text, voice.kokoroId);
-          } else {
-            throw err;
-          }
+      const rawSpeechSource = turn.ttsText || turn.text;
+      const segments = rawSpeechSource
+        .split(/(\[sfx:(?:notes|paper)\])/i)
+        .filter((seg) => seg.trim().length > 0);
+      const turnChunks = [];
+
+      for (let sIdx = 0; sIdx < segments.length; sIdx++) {
+        const seg = segments[sIdx];
+        if (/^\[sfx:(?:notes|paper)\]$/i.test(seg)) {
+          turnChunks.push(makeNoteFlipSfx());
+          continue;
         }
-      } else {
-        samples = await synthKokoro(turn.text, voice.kokoroId);
+        const speechText = normalizeForSpeech(seg);
+        if (!speechText) continue;
+        let segSamples;
+        if (activeProvider === "fish") {
+          try {
+            const mp3Buf = await synthFish(speechText, voice.fishId, args["fish-model"]);
+            segSamples = await decodeAudioToFloat32(ffmpegPath, tmpDir, `${i}-${sIdx}`, mp3Buf, "mp3");
+          } catch (err) {
+            if (args["auto-fallback"] && err.fallbackable) {
+              log(`Fish Audio unavailable (${err.message}); falling back to Kokoro-82M.`);
+              activeProvider = "kokoro";
+              segSamples = await synthKokoro(speechText, voice.kokoroId);
+            } else {
+              throw err;
+            }
+          }
+        } else {
+          segSamples = await synthKokoro(speechText, voice.kokoroId);
+        }
+        turnChunks.push(trimSilence(segSamples));
       }
 
-      const trimmed = trimSilence(samples);
+      const totalLen = turnChunks.reduce((sum, c) => sum + c.length, 0);
+      const trimmed = new Float32Array(totalLen);
+      let writeOffset = 0;
+      for (const chunk of turnChunks) {
+        trimmed.set(chunk, writeOffset);
+        writeOffset += chunk.length;
+      }
+
       const startMs = Math.round((cursorSamples / SAMPLE_RATE) * 1000);
       cursorSamples += trimmed.length;
       const endMs = Math.round((cursorSamples / SAMPLE_RATE) * 1000);
