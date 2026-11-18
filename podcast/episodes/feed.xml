@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0" xmlns:itunes="http://www.itunes.com/dtds/podcast-1.0.dtd" xmlns:atom="http://www.w3.org/2005/Atom">
+  <channel>
+    <title>TechWhoKnows Deep Dive</title>
+    <link>https://techwhoknows.com/podcasts</link>
+    <description>In-depth AI-hosted technical briefings on AI infrastructure, startups, cybersecurity, and Asia-Pacific technology from TechWhoKnows.</description>
+    <language>en-sg</language>
+    <itunes:author>TechWhoKnows (TWK)</itunes:author>
+    <itunes:category text="Technology" />
+    <itunes:explicit>false</itunes:explicit>
+    <atom:link href="https://techwhoknows.com/podcasts/feed.xml" rel="self" type="application/rss+xml" />
+    <item>
+      <title>Episode 1: Inside Southeast Asia&apos;s Sovereign Compute &amp; Inference Race</title>
+      <description>Why Singapore, Johor, and Batam have become Asia&apos;s most contested AI data-centre corridor, why power and cooling beat raw GPU counts, and how open-weight reasoning models are reshaping startup unit economics.</description>
+      <link>https://techwhoknows.com/podcasts/ep-01-asean-compute-race</link>
+      <guid isPermaLink="false">twk-podcast-ep-01-asean-compute-race</guid>
+      <pubDate>Wed, 18 Nov 2026 11:00:00 GMT</pubDate>
+      <enclosure url="https://techwhoknows.com/podcasts/ep-01-asean-compute-race/episode.mp3" length="4282412" type="audio/mpeg" />
+      <itunes:duration>268</itunes:duration>
+      <itunes:episode>1</itunes:episode>
+      <itunes:explicit>false</itunes:explicit>
+    </item>
+  </channel>
+</rss>

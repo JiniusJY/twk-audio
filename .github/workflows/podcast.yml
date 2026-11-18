@@ -1,0 +1,72 @@
+name: Podcast episode
+
+on:
+  workflow_dispatch:
+    inputs:
+      episode:
+        description: "Episode folder slug under podcast/episodes/"
+        required: true
+        default: "ep-01-asean-compute-race"
+      tts_provider:
+        description: "TTS provider (fish or kokoro)"
+        required: true
+        default: "fish"
+        type: choice
+        options:
+          - fish
+          - kokoro
+  repository_dispatch:
+    types: [podcast]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: podcast-${{ github.event.inputs.episode || github.event.client_payload.episode || 'default' }}
+  cancel-in-progress: false
+
+jobs:
+  build-episode:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      EPISODE: ${{ github.event.inputs.episode || github.event.client_payload.episode || 'ep-01-asean-compute-race' }}
+      TTS_PROVIDER: ${{ github.event.inputs.tts_provider || github.event.client_payload.tts_provider || 'fish' }}
+      FISH_AUDIO_API_KEY: ${{ secrets.FISH_AUDIO_API_KEY }}
+      KOKORO_CACHE_DIR: ${{ github.workspace }}/.cache/models
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Restore dependencies
+        id: deps
+        uses: actions/cache@v4
+        with:
+          path: node_modules
+          key: audio-node-${{ runner.os }}-node22-${{ hashFiles('package-lock.json') }}
+
+      - name: Install dependencies
+        if: steps.deps.outputs.cache-hit != 'true'
+        run: npm ci --no-audit --no-fund
+
+      - name: Restore Kokoro model (fallback cache)
+        uses: actions/cache@v4
+        with:
+          path: .cache/models
+          key: kokoro-82m-v1.0-onnx-fp32
+
+      - name: Generate podcast episode
+        run: node podcast/generate-podcast.mjs --episode "$EPISODE" --provider "$TTS_PROVIDER"
+
+      - name: Upload episode artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: podcast-${{ env.EPISODE }}
+          path: |
+            podcast/episodes/${{ env.EPISODE }}/episode.mp3
+            podcast/episodes/${{ env.EPISODE }}/transcript.json
+            podcast/episodes/${{ env.EPISODE }}/manifest.json
+            podcast/episodes/feed.xml

@@ -1,0 +1,57 @@
+{
+  "slug": "ep-01-asean-compute-race",
+  "episodeNumber": 1,
+  "title": "Episode 1: Inside Southeast Asia's Sovereign Compute & Inference Race",
+  "description": "Why Singapore, Johor, and Batam have become Asia's most contested AI data-centre corridor, why power and cooling beat raw GPU counts, and how open-weight reasoning models are reshaping startup unit economics.",
+  "publishedAt": "2026-11-18T11:00:00.000Z",
+  "durationSeconds": 267.58,
+  "bytes": 4282412,
+  "provider": "fish",
+  "model": "s2.1-pro-free",
+  "hosts": {
+    "A": {
+      "name": "Jade",
+      "role": "Lead Tech Editor"
+    },
+    "B": {
+      "name": "Alok",
+      "role": "Systems & Infrastructure Analyst"
+    }
+  },
+  "chapters": [
+    {
+      "title": "01. Why Compute Moved Across the Causeway",
+      "startMs": 0
+    },
+    {
+      "title": "02. The Hidden Bottleneck: Water, Transformers, and Grid Queues",
+      "startMs": 82696
+    },
+    {
+      "title": "03. Training Clusters vs Inference Economics",
+      "startMs": 131323
+    },
+    {
+      "title": "04. What Builders Should Watch Next",
+      "startMs": 199960
+    }
+  ],
+  "sources": [
+    {
+      "id": "src-1",
+      "title": "Singapore IMDA National AI Strategy 2.0 & Green Data Centre Roadmap",
+      "url": "https://www.imda.gov.sg/"
+    },
+    {
+      "id": "src-2",
+      "title": "Johor-Singapore Special Economic Zone (JS-SEZ) Infrastructure Brief",
+      "url": "https://www.mti.gov.sg/"
+    },
+    {
+      "id": "src-3",
+      "title": "TechWhoKnows APAC Compute & Inference Benchmarks",
+      "url": "https://techwhoknows.com"
+    }
+  ],
+  "aiDisclosure": "AI-hosted technical deep dive produced by TechWhoKnows."
+}

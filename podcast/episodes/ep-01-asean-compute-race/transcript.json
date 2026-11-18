@@ -1,0 +1,255 @@
+{
+  "slug": "ep-01-asean-compute-race",
+  "title": "Episode 1: Inside Southeast Asia's Sovereign Compute & Inference Race",
+  "episodeNumber": 1,
+  "durationSeconds": 267.58,
+  "chapters": [
+    {
+      "title": "01. Why Compute Moved Across the Causeway",
+      "startMs": 0
+    },
+    {
+      "title": "02. The Hidden Bottleneck: Water, Transformers, and Grid Queues",
+      "startMs": 82696
+    },
+    {
+      "title": "03. Training Clusters vs Inference Economics",
+      "startMs": 131323
+    },
+    {
+      "title": "04. What Builders Should Watch Next",
+      "startMs": 199960
+    }
+  ],
+  "sources": [
+    {
+      "id": "src-1",
+      "title": "Singapore IMDA National AI Strategy 2.0 & Green Data Centre Roadmap",
+      "url": "https://www.imda.gov.sg/"
+    },
+    {
+      "id": "src-2",
+      "title": "Johor-Singapore Special Economic Zone (JS-SEZ) Infrastructure Brief",
+      "url": "https://www.mti.gov.sg/"
+    },
+    {
+      "id": "src-3",
+      "title": "TechWhoKnows APAC Compute & Inference Benchmarks",
+      "url": "https://techwhoknows.com"
+    }
+  ],
+  "turns": [
+    {
+      "id": 1,
+      "speaker": "Jade",
+      "speakerRole": "Lead Tech Editor",
+      "speakerKey": "A",
+      "chapter": "01. Why Compute Moved Across the Causeway",
+      "startMs": 0,
+      "endMs": 14632,
+      "text": "Welcome to TechWhoKnows Deep Dive. I am Jade. Today we are looking at a structural shift happening right in our backyard: the race to build sovereign AI compute across Singapore, Johor, and Batam.",
+      "citations": [
+        "src-1"
+      ]
+    },
+    {
+      "id": 2,
+      "speaker": "Alok",
+      "speakerRole": "Systems & Infrastructure Analyst",
+      "speakerKey": "B",
+      "chapter": "01. Why Compute Moved Across the Causeway",
+      "startMs": 14892,
+      "endMs": 29423,
+      "text": "And I am Alok. If you only read press releases, it sounds like every telco and cloud provider in Southeast Asia is suddenly building a gigawatt-scale AI factory. Once you look at the power grid and cooling constraints, the story gets much sharper.",
+      "citations": [
+        "src-2"
+      ]
+    },
+    {
+      "id": 3,
+      "speaker": "Jade",
+      "speakerRole": "Lead Tech Editor",
+      "speakerKey": "A",
+      "chapter": "01. Why Compute Moved Across the Causeway",
+      "startMs": 29683,
+      "endMs": 48234,
+      "text": "Let us start with why Singapore itself hit a wall. Under the Green Data Centre Roadmap, Singapore capped new capacity and enforced strict Power Usage Effectiveness targets—around 1.3 or better—because land and grid headroom are finite.",
+      "citations": [
+        "src-1"
+      ]
+    },
+    {
+      "id": 4,
+      "speaker": "Alok",
+      "speakerRole": "Systems & Infrastructure Analyst",
+      "speakerKey": "B",
+      "chapter": "01. Why Compute Moved Across the Causeway",
+      "startMs": 48494,
+      "endMs": 66239,
+      "text": "Exactly. A modern liquid-cooled rack packing Blackwell or Rubin-class accelerators pulls 100 to 130 kilowatts per cabinet. Ten years ago, a typical enterprise rack pulled eight. You cannot simply retrofit legacy air-cooled colocation halls in Jurong for that thermal density.",
+      "citations": []
+    },
+    {
+      "id": 5,
+      "speaker": "Jade",
+      "speakerRole": "Lead Tech Editor",
+      "speakerKey": "A",
+      "chapter": "01. Why Compute Moved Across the Causeway",
+      "startMs": 66499,
+      "endMs": 82046,
+      "text": "So operators did the obvious thing: they kept latency-sensitive inference and financial workloads inside Singapore, and pushed training and heavy batch clusters twenty minutes north across the Causeway into Johor, or south by ferry to Batam.",
+      "citations": [
+        "src-2"
+      ]
+    },
+    {
+      "id": 6,
+      "speaker": "Alok",
+      "speakerRole": "Systems & Infrastructure Analyst",
+      "speakerKey": "B",
+      "chapter": "02. The Hidden Bottleneck: Water, Transformers, and Grid Queues",
+      "startMs": 82696,
+      "endMs": 97508,
+      "text": "Everyone talks about Nvidia allocation, as if getting the GPUs is the hard part. In practice, hyperscalers in Johor are waiting eighteen to thirty-six months for high-voltage substation transformers and reliable industrial water for evaporative cooling.",
+      "citations": [
+        "src-2"
+      ]
+    },
+    {
+      "id": 7,
+      "speaker": "Jade",
+      "speakerRole": "Lead Tech Editor",
+      "speakerKey": "A",
+      "chapter": "02. The Hidden Bottleneck: Water, Transformers, and Grid Queues",
+      "startMs": 97768,
+      "endMs": 115813,
+      "text": "That is a detail most market commentary misses. Even with the Johor-Singapore Special Economic Zone smoothing cross-border fibre and customs, electrons do not care about MOUs. If your substation lead time is two years, your cluster sits dark.",
+      "citations": [
+        "src-2"
+      ]
+    },
+    {
+      "id": 8,
+      "speaker": "Alok",
+      "speakerRole": "Systems & Infrastructure Analyst",
+      "speakerKey": "B",
+      "chapter": "02. The Hidden Bottleneck: Water, Transformers, and Grid Queues",
+      "startMs": 116073,
+      "endMs": 130673,
+      "text": "Right. And that explains why operators who locked in grid connections in 2023 and 2024 are now commanding huge lease premiums. In ASEAN, power-ready shell capacity is the real moat—not just signing a GPU purchase order.",
+      "citations": []
+    },
+    {
+      "id": 9,
+      "speaker": "Jade",
+      "speakerRole": "Lead Tech Editor",
+      "speakerKey": "A",
+      "chapter": "03. Training Clusters vs Inference Economics",
+      "startMs": 131323,
+      "endMs": 146686,
+      "text": "Let us talk about what actually runs on these clusters. A year ago, every regional sovereign AI pitch focused on pre-training a local foundation model from scratch. Are people still spending tens of millions on pre-training?",
+      "citations": [
+        "src-1"
+      ]
+    },
+    {
+      "id": 10,
+      "speaker": "Alok",
+      "speakerRole": "Systems & Infrastructure Analyst",
+      "speakerKey": "B",
+      "chapter": "03. Training Clusters vs Inference Economics",
+      "startMs": 146946,
+      "endMs": 164445,
+      "text": "Far less than they used to. Frontier labs already amortised the multi-hundred-million-dollar pre-training runs. What ASEAN enterprises and governments actually need now is post-training: domain fine-tuning, reinforcement learning on local regulatory and financial corpora, and high-throughput inference.",
+      "citations": [
+        "src-3"
+      ]
+    },
+    {
+      "id": 11,
+      "speaker": "Jade",
+      "speakerRole": "Lead Tech Editor",
+      "speakerKey": "A",
+      "chapter": "03. Training Clusters vs Inference Economics",
+      "startMs": 164705,
+      "endMs": 181365,
+      "text": "And that changes the hardware maths completely. Inference with test-time reasoning models is memory-bandwidth bound, not raw FLOPs bound. You care about tokens per second per dollar and KV-cache capacity across long contexts.",
+      "citations": [
+        "src-3"
+      ]
+    },
+    {
+      "id": 12,
+      "speaker": "Alok",
+      "speakerRole": "Systems & Infrastructure Analyst",
+      "speakerKey": "B",
+      "chapter": "03. Training Clusters vs Inference Economics",
+      "startMs": 181625,
+      "endMs": 199310,
+      "text": "Precisely. A Singapore fintech running multi-step compliance agents does not need a 4,000-GPU InfiniBand training pod. It needs low-latency FP8 or INT4 serving with predictable tail latency under 200 milliseconds—and strict data residency.",
+      "citations": []
+    },
+    {
+      "id": 13,
+      "speaker": "Jade",
+      "speakerRole": "Lead Tech Editor",
+      "speakerKey": "A",
+      "chapter": "04. What Builders Should Watch Next",
+      "startMs": 199960,
+      "endMs": 208729,
+      "text": "So if you are a startup founder or CTO in Singapore or Southeast Asia right now, what is the practical takeaway from all this?",
+      "citations": []
+    },
+    {
+      "id": 14,
+      "speaker": "Alok",
+      "speakerRole": "Systems & Infrastructure Analyst",
+      "speakerKey": "B",
+      "chapter": "04. What Builders Should Watch Next",
+      "startMs": 208989,
+      "endMs": 230239,
+      "text": "First, do not over-index on owning bare-metal clusters unless your workload runs at 70-plus per cent utilisation round the clock. Second, benchmark smaller open-weight models—distilled 8B to 32B models—against frontier APIs. For structured extraction, coding, and agent routing, the cost gap is often ten to twenty times.",
+      "citations": [
+        "src-3"
+      ]
+    },
+    {
+      "id": 15,
+      "speaker": "Jade",
+      "speakerRole": "Lead Tech Editor",
+      "speakerKey": "A",
+      "chapter": "04. What Builders Should Watch Next",
+      "startMs": 230499,
+      "endMs": 247349,
+      "text": "And third, pay attention to where your data actually sits. With sovereign compute zones maturing across Singapore, Johor, and Jakarta, enterprise buyers are starting to ask for proof of regional inference before they sign six-figure contracts.",
+      "citations": [
+        "src-1",
+        "src-2"
+      ]
+    },
+    {
+      "id": 16,
+      "speaker": "Alok",
+      "speakerRole": "Systems & Infrastructure Analyst",
+      "speakerKey": "B",
+      "chapter": "04. What Builders Should Watch Next",
+      "startMs": 247609,
+      "endMs": 253683,
+      "text": "Agreed. Infrastructure is finally catching up to the hype—just not in the places most people expected.",
+      "citations": []
+    },
+    {
+      "id": 17,
+      "speaker": "Jade",
+      "speakerRole": "Lead Tech Editor",
+      "speakerKey": "A",
+      "chapter": "04. What Builders Should Watch Next",
+      "startMs": 253943,
+      "endMs": 267580,
+      "text": "That is our first deep dive. You can read the full source links and click any paragraph in the synced transcript below, or use the Ask the Hosts drawer to dig into the benchmarks. Thanks for listening to TechWhoKnows.",
+      "citations": [
+        "src-3"
+      ]
+    }
+  ]
+}
