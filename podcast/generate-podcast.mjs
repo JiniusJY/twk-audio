@@ -40,8 +40,8 @@ if (!args.episode && !args.auto) {
 }
 
 const SAMPLE_RATE = 24000;
-const TURN_GAP_S = 0.26;
-const CHAPTER_GAP_S = 0.65;
+const TURN_GAP_S = 0.32;
+const CHAPTER_GAP_S = 0.75;
 const KOKORO_MODEL_ID = "onnx-community/Kokoro-82M-v1.0-ONNX";
 
 const DEFAULT_VOICES = {
@@ -54,7 +54,7 @@ const DEFAULT_VOICES = {
   B: {
     name: "Alok",
     role: "Systems & Infrastructure Analyst",
-    fishId: process.env.FISH_VOICE_B || "536d3a5e000945adb7038665781a4aca",
+    fishId: process.env.FISH_VOICE_B || "83fa5723578744f5898f96b83582ece0",
     kokoroId: process.env.KOKORO_VOICE_B || "bm_george",
   },
 };
@@ -108,7 +108,7 @@ function trimSilence(samples, threshold = 0.008) {
   let end = samples.length - 1;
   while (start < end && Math.abs(samples[start]) < threshold) start++;
   while (end > start && Math.abs(samples[end]) < threshold) end--;
-  const pad = Math.round(SAMPLE_RATE * 0.03);
+  const pad = Math.round(SAMPLE_RATE * 0.05);
   return samples.subarray(Math.max(0, start - pad), Math.min(samples.length, end + pad + 1));
 }
 
@@ -278,10 +278,10 @@ async function synthFish(text, referenceId, model) {
         reference_id: referenceId,
         format: "mp3",
         mp3_bitrate: 128,
-        temperature: 0.8,
-        top_p: 0.8,
+        temperature: 0.68,
+        top_p: 0.78,
         prosody: {
-          speed: 1.0,
+          speed: 0.98,
           volume: 0,
           normalize_loudness: true,
         },
