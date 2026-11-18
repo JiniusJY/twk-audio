@@ -1,12 +1,14 @@
 name: Podcast episode
 
 on:
+  schedule:
+    - cron: "0 0,6,12,18 * * *" # 4x/day backstop (08:00, 14:00, 20:00, 02:00 SGT)
   workflow_dispatch:
     inputs:
       episode:
-        description: "Episode folder slug under podcast/episodes/"
+        description: "Episode folder slug under podcast/episodes/ (leave 'auto' to generate from top recent story)"
         required: true
-        default: "ep-01-asean-compute-race"
+        default: "auto"
       tts_provider:
         description: "TTS provider (fish or kokoro)"
         required: true
@@ -22,7 +24,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: podcast-${{ github.event.inputs.episode || github.event.client_payload.episode || 'default' }}
+  group: podcast-${{ github.event.inputs.episode || github.event.client_payload.episode || 'auto' }}
   cancel-in-progress: false
 
 jobs:
@@ -30,7 +32,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     env:
-      EPISODE: ${{ github.event.inputs.episode || github.event.client_payload.episode || 'ep-01-asean-compute-race' }}
+      EPISODE: ${{ github.event.inputs.episode || github.event.client_payload.episode || 'auto' }}
       TTS_PROVIDER: ${{ github.event.inputs.tts_provider || github.event.client_payload.tts_provider || 'fish' }}
       TWK_AUTOMATION_URL: ${{ secrets.TWK_AUTOMATION_URL }}
       AUTOMATION_INGEST_SECRET: ${{ secrets.AUTOMATION_INGEST_SECRET }}
@@ -60,14 +62,21 @@ jobs:
           key: kokoro-82m-v1.0-onnx-fp32
 
       - name: Generate podcast episode
-        run: node podcast/generate-podcast.mjs --episode "$EPISODE" --provider "$TTS_PROVIDER"
+        run: |
+          if [ "$EPISODE" = "auto" ]; then
+            node podcast/generate-podcast.mjs --auto --provider "$TTS_PROVIDER"
+          else
+            node podcast/generate-podcast.mjs --episode "$EPISODE" --provider "$TTS_PROVIDER"
+          fi
 
       - name: Upload episode artifacts
+        if: always()
         uses: actions/upload-artifact@v4
         with:
+          if-no-files-found: ignore
           name: podcast-${{ env.EPISODE }}
           path: |
-            podcast/episodes/${{ env.EPISODE }}/episode.mp3
-            podcast/episodes/${{ env.EPISODE }}/transcript.json
-            podcast/episodes/${{ env.EPISODE }}/manifest.json
+            podcast/episodes/*/episode.mp3
+            podcast/episodes/*/transcript.json
+            podcast/episodes/*/manifest.json
             podcast/episodes/feed.xml

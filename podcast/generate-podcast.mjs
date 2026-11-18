@@ -24,6 +24,7 @@ const repoRoot = path.resolve(here, "..");
 const { values: args } = parseArgs({
   options: {
     episode: { type: "string" },
+    auto: { type: "boolean", default: false },
     provider: { type: "string", default: process.env.TTS_PROVIDER || "fish" },
     "fish-model": { type: "string", default: process.env.FISH_AUDIO_MODEL || "s2.1-pro-free" },
     "auto-fallback": { type: "boolean", default: true },
@@ -33,8 +34,8 @@ const { values: args } = parseArgs({
   },
 });
 
-if (!args.episode) {
-  console.error("Missing required --episode <slug>");
+if (!args.episode && !args.auto) {
+  console.error("Provide --episode <slug> or --auto");
   process.exit(1);
 }
 
@@ -286,11 +287,34 @@ ${itemsXml}
 
 async function main() {
   const episodesRoot = path.join(repoRoot, "podcast", "episodes");
-  const episodeDir = path.join(episodesRoot, args.episode);
-  const outDir = args.out ? path.resolve(args.out) : episodeDir;
-  const scriptPath = path.join(episodeDir, "script.json");
+  let script;
+  let episodeSlug = args.episode;
 
-  const script = JSON.parse(await readFile(scriptPath, "utf8"));
+  if (args.auto || !episodeSlug) {
+    const baseUrl = (process.env.TWK_AUTOMATION_URL || "").replace(/\/$/, "");
+    const secret = process.env.AUTOMATION_INGEST_SECRET || "";
+    if (!baseUrl || !secret) {
+      throw new Error("--auto requires TWK_AUTOMATION_URL and AUTOMATION_INGEST_SECRET");
+    }
+    const res = await fetch(`${baseUrl}/api/automation/podcast`, {
+      headers: { Authorization: `Bearer ${secret}` },
+      signal: AbortSignal.timeout(60_000),
+    });
+    if (!res.ok) throw new Error(`GET /api/automation/podcast ${res.status}: ${await res.text()}`);
+    const data = await res.json();
+    if (!data.pending || !data.script) {
+      log(`No episode queued (${data.reason || "none"}). Exiting cleanly.`);
+      return;
+    }
+    script = data.script;
+    episodeSlug = script.slug;
+  } else {
+    const scriptPath = path.join(episodesRoot, episodeSlug, "script.json");
+    script = JSON.parse(await readFile(scriptPath, "utf8"));
+  }
+
+  const episodeDir = path.join(episodesRoot, episodeSlug);
+  const outDir = args.out ? path.resolve(args.out) : episodeDir;
   const ffmpegPath = await resolveFfmpeg();
   const tmpDir = await mkdir(path.join(os.tmpdir(), `twk-podcast-${Date.now()}`), { recursive: true });
 
