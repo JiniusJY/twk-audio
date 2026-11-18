@@ -1,7 +1,8 @@
 name: Article audio
 
 # Reads new TechWhoKnows stories aloud with Kokoro and uploads the MP3s (generate.mjs).
-# Public repo, so standard runners are free. Hourly, so audio follows a story within the hour.
+# Public repo, so standard runners are free. The site sends a repository_dispatch right after publishing;
+# the hourly cron is only a backstop (GitHub delays scheduled runs by many hours).
 on:
   schedule:
     - cron: "20 * * * *"
