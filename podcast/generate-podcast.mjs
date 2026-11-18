@@ -40,8 +40,8 @@ if (!args.episode && !args.auto) {
 }
 
 const SAMPLE_RATE = 24000;
-const TURN_GAP_S = 0.32;
-const CHAPTER_GAP_S = 0.75;
+const TURN_GAP_S = 0.18;
+const CHAPTER_GAP_S = 0.55;
 const KOKORO_MODEL_ID = "onnx-community/Kokoro-82M-v1.0-ONNX";
 
 const DEFAULT_VOICES = {
@@ -49,12 +49,14 @@ const DEFAULT_VOICES = {
     name: "Jade Chen",
     role: "Lead Tech Editor",
     fishId: process.env.FISH_VOICE_A || "6ab4c6b0f37f4243a99046478647be94",
+    fishSpeed: Number(process.env.FISH_SPEED_A || 1.12),
     kokoroId: process.env.KOKORO_VOICE_A || "bf_emma",
   },
   B: {
     name: "Alok Nair",
     role: "Systems & Infrastructure Analyst",
     fishId: process.env.FISH_VOICE_B || "83fa5723578744f5898f96b83582ece0",
+    fishSpeed: Number(process.env.FISH_SPEED_B || 1.04),
     kokoroId: process.env.KOKORO_VOICE_B || "bm_george",
   },
 };
@@ -108,7 +110,7 @@ function trimSilence(samples, threshold = 0.008) {
   let end = samples.length - 1;
   while (start < end && Math.abs(samples[start]) < threshold) start++;
   while (end > start && Math.abs(samples[end]) < threshold) end--;
-  const pad = Math.round(SAMPLE_RATE * 0.05);
+  const pad = Math.round(SAMPLE_RATE * 0.025);
   return samples.subarray(Math.max(0, start - pad), Math.min(samples.length, end + pad + 1));
 }
 
@@ -263,7 +265,7 @@ function normalizeForSpeech(rawText) {
     .trim();
 }
 
-async function synthFish(text, referenceId, model) {
+async function synthFish(text, referenceId, model, speed = 1.05) {
   const apiKey = process.env.FISH_AUDIO_API_KEY;
   if (apiKey) {
     const res = await fetch("https://api.fish.audio/v1/tts", {
@@ -278,10 +280,10 @@ async function synthFish(text, referenceId, model) {
         reference_id: referenceId,
         format: "mp3",
         mp3_bitrate: 128,
-        temperature: 0.68,
-        top_p: 0.78,
+        temperature: 0.84,
+        top_p: 0.86,
         prosody: {
-          speed: 0.98,
+          speed,
           volume: 0,
           normalize_loudness: true,
         },
@@ -312,7 +314,15 @@ async function synthFish(text, referenceId, model) {
       Authorization: `Bearer ${secret}`,
       "Content-Type": "application/json",
     },
-    body: JSON.stringify({ action: "tts", text, referenceId, model }),
+    body: JSON.stringify({
+      action: "tts",
+      text,
+      referenceId,
+      model,
+      temperature: 0.84,
+      topP: 0.86,
+      speed,
+    }),
     signal: AbortSignal.timeout(45_000),
   });
   if (!res.ok) {
@@ -493,7 +503,7 @@ async function main() {
         let segSamples;
         if (activeProvider === "fish") {
           try {
-            const mp3Buf = await synthFish(speechText, voice.fishId, args["fish-model"]);
+            const mp3Buf = await synthFish(speechText, voice.fishId, args["fish-model"], voice.fishSpeed);
             segSamples = await decodeAudioToFloat32(ffmpegPath, tmpDir, `${i}-${sIdx}`, mp3Buf, "mp3");
           } catch (err) {
             if (args["auto-fallback"] && err.fallbackable) {
