@@ -27,6 +27,7 @@ const { values: args } = parseArgs({
     provider: { type: "string", default: process.env.TTS_PROVIDER || "fish" },
     "fish-model": { type: "string", default: process.env.FISH_AUDIO_MODEL || "s2.1-pro-free" },
     "auto-fallback": { type: "boolean", default: true },
+    publish: { type: "boolean", default: Boolean(process.env.TWK_AUTOMATION_URL && process.env.AUTOMATION_INGEST_SECRET) },
     out: { type: "string" },
     "dry-run": { type: "boolean", default: false },
   },
@@ -148,32 +149,55 @@ function stripDeliveryTags(text) {
 
 async function synthFish(text, referenceId, model) {
   const apiKey = process.env.FISH_AUDIO_API_KEY;
-  if (!apiKey) {
-    const err = new Error("FISH_AUDIO_API_KEY is not set");
+  if (apiKey) {
+    const res = await fetch("https://api.fish.audio/v1/tts", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        "Content-Type": "application/json",
+        model,
+      },
+      body: JSON.stringify({
+        text,
+        reference_id: referenceId,
+        format: "mp3",
+        mp3_bitrate: 128,
+        normalize: true,
+      }),
+      signal: AbortSignal.timeout(45_000),
+    });
+    if (!res.ok) {
+      const body = await res.text().catch(() => "");
+      const err = new Error(`Fish Audio ${res.status}: ${body.slice(0, 200)}`);
+      err.status = res.status;
+      err.fallbackable = res.status === 401 || res.status === 402 || res.status === 403 || res.status === 429;
+      throw err;
+    }
+    return Buffer.from(await res.arrayBuffer());
+  }
+
+  // Relay through Vercel (TWK) where FISH_AUDIO_API_KEY is stored.
+  const baseUrl = (process.env.TWK_AUTOMATION_URL || "").replace(/\/$/, "");
+  const secret = process.env.AUTOMATION_INGEST_SECRET || "";
+  if (!baseUrl || !secret) {
+    const err = new Error("Neither FISH_AUDIO_API_KEY nor TWK_AUTOMATION_URL/AUTOMATION_INGEST_SECRET is set");
     err.fallbackable = true;
     throw err;
   }
-  const res = await fetch("https://api.fish.audio/v1/tts", {
+  const res = await fetch(`${baseUrl}/api/automation/podcast`, {
     method: "POST",
     headers: {
-      Authorization: `Bearer ${apiKey}`,
+      Authorization: `Bearer ${secret}`,
       "Content-Type": "application/json",
-      model,
     },
-    body: JSON.stringify({
-      text,
-      reference_id: referenceId,
-      format: "mp3",
-      mp3_bitrate: 128,
-      normalize: true,
-    }),
+    body: JSON.stringify({ action: "tts", text, referenceId, model }),
     signal: AbortSignal.timeout(45_000),
   });
   if (!res.ok) {
     const body = await res.text().catch(() => "");
-    const err = new Error(`Fish Audio ${res.status}: ${body.slice(0, 200)}`);
+    const err = new Error(`TWK TTS proxy ${res.status}: ${body.slice(0, 200)}`);
     err.status = res.status;
-    err.fallbackable = res.status === 401 || res.status === 402 || res.status === 403 || res.status === 429;
+    err.fallbackable = [401, 402, 403, 429, 503].includes(res.status);
     throw err;
   }
   return Buffer.from(await res.arrayBuffer());
@@ -401,9 +425,69 @@ async function main() {
     await rebuildRssFeed(episodesRoot);
 
     log(`Done! ${mp3Path} (${(mp3Stat.byteLength / 1024 / 1024).toFixed(2)} MB, ${durationSeconds}s)`);
+
+    if (args.publish) {
+      await publishToTwk(script.slug, outDir, episodesRoot);
+    }
   } finally {
     await rm(tmpDir, { recursive: true, force: true });
   }
+}
+
+async function publishToTwk(slug, outDir, episodesRoot) {
+  const baseUrl = (process.env.TWK_AUTOMATION_URL || "").replace(/\/$/, "");
+  const secret = process.env.AUTOMATION_INGEST_SECRET || "";
+  if (!baseUrl || !secret) {
+    log("Skipping website publish (TWK_AUTOMATION_URL / AUTOMATION_INGEST_SECRET not set).");
+    return;
+  }
+
+  log(`Publishing ${slug} to ${baseUrl}...`);
+  const urlRes = await fetch(`${baseUrl}/api/automation/podcast`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${secret}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ action: "upload-url", slug }),
+  });
+  if (!urlRes.ok) {
+    throw new Error(`upload-url failed ${urlRes.status}: ${await urlRes.text()}`);
+  }
+  const { uploads } = await urlRes.json();
+
+  const files = [
+    ["mp3", path.join(outDir, "episode.mp3"), "audio/mpeg"],
+    ["transcript", path.join(outDir, "transcript.json"), "application/json"],
+    ["manifest", path.join(outDir, "manifest.json"), "application/json"],
+    ["feed", path.join(episodesRoot, "feed.xml"), "application/rss+xml"],
+  ];
+
+  for (const [key, filePath, contentType] of files) {
+    const buf = await readFile(filePath);
+    const putRes = await fetch(uploads[key].signedUrl, {
+      method: "PUT",
+      headers: { "Content-Type": contentType },
+      body: buf,
+    });
+    if (!putRes.ok) {
+      throw new Error(`Upload ${key} failed ${putRes.status}: ${await putRes.text()}`);
+    }
+  }
+
+  const doneRes = await fetch(`${baseUrl}/api/automation/podcast`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${secret}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ action: "complete", slug }),
+  });
+  if (!doneRes.ok) {
+    throw new Error(`complete failed ${doneRes.status}: ${await doneRes.text()}`);
+  }
+  const doneJson = await doneRes.json();
+  log(`Published to ${doneJson.episodeUrl} | IndexNow: ${doneJson.indexing?.indexNow?.message || "ok"}`);
 }
 
 main().catch((err) => {

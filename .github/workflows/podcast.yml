@@ -32,7 +32,8 @@ jobs:
     env:
       EPISODE: ${{ github.event.inputs.episode || github.event.client_payload.episode || 'ep-01-asean-compute-race' }}
       TTS_PROVIDER: ${{ github.event.inputs.tts_provider || github.event.client_payload.tts_provider || 'fish' }}
-      FISH_AUDIO_API_KEY: ${{ secrets.FISH_AUDIO_API_KEY }}
+      TWK_AUTOMATION_URL: ${{ secrets.TWK_AUTOMATION_URL }}
+      AUTOMATION_INGEST_SECRET: ${{ secrets.AUTOMATION_INGEST_SECRET }}
       KOKORO_CACHE_DIR: ${{ github.workspace }}/.cache/models
     steps:
       - uses: actions/checkout@v4
