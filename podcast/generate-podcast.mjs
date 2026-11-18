@@ -276,7 +276,7 @@ async function rebuildRssFeed(episodesRoot) {
     <itunes:author>TechWhoKnows (TWK)</itunes:author>
     <itunes:category text="Technology" />
     <itunes:explicit>false</itunes:explicit>
-    <atom:link href="https://techwhoknows.com/podcasts/feed.xml" rel="self" type="application/xml" />
+    <atom:link href="https://techwhoknows.com/podcasts/feed.xml" rel="self" type="application/rss+xml" />
 ${itemsXml}
   </channel>
 </rss>
@@ -484,7 +484,7 @@ async function publishToTwk(slug, outDir, episodesRoot) {
     ["mp3", path.join(outDir, "episode.mp3"), "audio/mpeg"],
     ["transcript", path.join(outDir, "transcript.json"), "application/json"],
     ["manifest", path.join(outDir, "manifest.json"), "application/json"],
-    ["feed", path.join(episodesRoot, "feed.xml"), "application/rss+xml"],
+    ["feed", path.join(episodesRoot, "feed.xml"), "application/xml"],
   ];
 
   for (const [key, filePath, contentType] of files) {
