@@ -276,7 +276,7 @@ async function rebuildRssFeed(episodesRoot) {
     <itunes:author>TechWhoKnows (TWK)</itunes:author>
     <itunes:category text="Technology" />
     <itunes:explicit>false</itunes:explicit>
-    <atom:link href="https://techwhoknows.com/podcasts/feed.xml" rel="self" type="application/rss+xml" />
+    <atom:link href="https://techwhoknows.com/podcasts/feed.xml" rel="self" type="application/xml" />
 ${itemsXml}
   </channel>
 </rss>
