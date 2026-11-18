@@ -48,8 +48,8 @@ const DEFAULT_VOICES = {
   A: {
     name: "Jade Chen",
     role: "Lead Tech Editor",
-    fishId: process.env.FISH_VOICE_A || "ee4129750b264b0aa270f353ca672e7a",
-    fishSpeed: Number(process.env.FISH_SPEED_A || 1.04),
+    fishId: process.env.FISH_VOICE_A || "b545c585f631496c914815291da4e893",
+    fishSpeed: Number(process.env.FISH_SPEED_A || 1.06),
     kokoroId: process.env.KOKORO_VOICE_A || "bf_emma",
   },
   B: {
