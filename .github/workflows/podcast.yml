@@ -9,14 +9,17 @@ on:
         description: "Episode folder slug under podcast/episodes/ (leave 'auto' to generate from top recent story)"
         required: true
         default: "auto"
-      tts_provider:
-        description: "TTS provider (fish or kokoro)"
-        required: true
-        default: "fish"
-        type: choice
-        options:
-          - fish
-          - kokoro
+      minutes:
+        description: "Maximum runtime in minutes (8–120). The writer can shorten thin topics."
+        default: "30"
+      story:
+        description: "TWK story slug. Required for specials over 30 minutes."
+      sources:
+        description: "Optional supporting TWK story slugs, separated by spaces."
+      publish:
+        description: "Publish the rendered episode"
+        type: boolean
+        default: false
   repository_dispatch:
     types: [podcast]
 
@@ -24,19 +27,23 @@ permissions:
   contents: read
 
 concurrency:
-  group: podcast-${{ github.event.inputs.episode || github.event.client_payload.episode || 'auto' }}
+  group: podcast
   cancel-in-progress: false
 
 jobs:
   build-episode:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 120
     env:
       EPISODE: ${{ github.event.inputs.episode || github.event.client_payload.episode || 'auto' }}
-      TTS_PROVIDER: ${{ github.event.inputs.tts_provider || github.event.client_payload.tts_provider || 'fish' }}
+      PODCAST_MINUTES: ${{ github.event.inputs.minutes || github.event.client_payload.minutes || '30' }}
+      PODCAST_STORY: ${{ github.event.inputs.story || github.event.client_payload.story }}
+      PODCAST_SOURCES: ${{ github.event.inputs.sources || github.event.client_payload.sources }}
+      PODCAST_PUBLISH: ${{ github.event_name != 'workflow_dispatch' || inputs.publish }}
+      TTS_PROVIDER: fish
+      FISH_AUDIO_MODEL: ${{ vars.FISH_AUDIO_MODEL || 's2.1-pro-free' }}
       TWK_AUTOMATION_URL: ${{ secrets.TWK_AUTOMATION_URL }}
       AUTOMATION_INGEST_SECRET: ${{ secrets.AUTOMATION_INGEST_SECRET }}
-      KOKORO_CACHE_DIR: ${{ github.workspace }}/.cache/models
     steps:
       - uses: actions/checkout@v4
 
@@ -55,19 +62,23 @@ jobs:
         if: steps.deps.outputs.cache-hit != 'true'
         run: npm ci --no-audit --no-fund
 
-      - name: Restore Kokoro model (fallback cache)
-        uses: actions/cache@v4
-        with:
-          path: .cache/models
-          key: kokoro-82m-v1.0-onnx-fp32
-
       - name: Generate podcast episode
         run: |
-          if [ "$EPISODE" = "auto" ]; then
-            node podcast/generate-podcast.mjs --auto --provider "$TTS_PROVIDER"
+          args=(--provider fish)
+          if [[ "$PODCAST_PUBLISH" == "true" ]]; then
+            args+=(--publish)
           else
-            node podcast/generate-podcast.mjs --episode "$EPISODE" --provider "$TTS_PROVIDER"
+            args+=(--no-publish)
           fi
+          if [[ "$EPISODE" == "auto" ]]; then
+            args+=(--auto --minutes "$PODCAST_MINUTES")
+            if [[ -n "$PODCAST_STORY" ]]; then args+=(--story "$PODCAST_STORY"); fi
+            read -r -a sources <<< "$PODCAST_SOURCES"
+            for source in "${sources[@]}"; do args+=(--source "$source"); done
+          else
+            args+=(--episode "$EPISODE")
+          fi
+          node podcast/generate-podcast.mjs "${args[@]}"
 
       - name: Upload episode artifacts
         if: always()
@@ -76,6 +87,8 @@ jobs:
           if-no-files-found: ignore
           name: podcast-${{ env.EPISODE }}
           path: |
+            podcast/episodes/*/script.json
+            podcast/episodes/*/draft-progress.json
             podcast/episodes/*/episode.mp3
             podcast/episodes/*/transcript.json
             podcast/episodes/*/manifest.json

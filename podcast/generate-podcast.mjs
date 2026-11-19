@@ -5,16 +5,17 @@
  *
  * Supports two TTS providers:
  *   - fish   : Fish Audio API (default: s2.1-pro-free; set FISH_AUDIO_MODEL=s2.1-pro later)
- *   - kokoro : Open-weight Kokoro-82M ONNX (Apache 2.0, $0 forever fallback)
+ *   - kokoro : Optional local comparison mode (Apache 2.0); production uses Fish Audio
  *
  * Usage:
  *   node podcast/generate-podcast.mjs --episode ep-01-asean-compute-race
  *   node podcast/generate-podcast.mjs --episode ep-01-asean-compute-race --provider kokoro
  */
 import { spawn } from "node:child_process";
-import { mkdir, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, readdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 
@@ -22,12 +23,16 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(here, "..");
 
 const { values: args } = parseArgs({
+  allowNegative: true,
   options: {
     episode: { type: "string" },
     auto: { type: "boolean", default: false },
+    story: { type: "string" },
+    source: { type: "string", multiple: true },
+    minutes: { type: "string", default: "30" },
+    "draft-only": { type: "boolean", default: false },
     provider: { type: "string", default: process.env.TTS_PROVIDER || "fish" },
     "fish-model": { type: "string", default: process.env.FISH_AUDIO_MODEL || "s2.1-pro-free" },
-    "auto-fallback": { type: "boolean", default: true },
     publish: { type: "boolean", default: Boolean(process.env.TWK_AUTOMATION_URL && process.env.AUTOMATION_INGEST_SECRET) },
     out: { type: "string" },
     "dry-run": { type: "boolean", default: false },
@@ -336,6 +341,16 @@ async function synthFish(text, referenceId, model, speed = 1.05) {
 }
 
 let kokoroInstance = null;
+async function synthFishWithRetry(...input) {
+  try {
+    return await synthFish(...input);
+  } catch (error) {
+    if (error.status !== 429 && !(error.status >= 500) && error.name !== "TimeoutError") throw error;
+    await delay(4000);
+    return synthFish(...input);
+  }
+}
+
 async function getKokoro() {
   if (kokoroInstance) return kokoroInstance;
   const { KokoroTTS } = await import("kokoro-js");
@@ -416,28 +431,87 @@ ${itemsXml}
   log(`Updated RSS feed (${manifests.length} episode(s)) -> ${path.relative(repoRoot, path.join(episodesRoot, "feed.xml"))}`);
 }
 
+async function fetchDraft(baseUrl, secret, slugPath, body) {
+  const headers = { Authorization: `Bearer ${secret}` };
+  if (body) headers["Content-Type"] = "application/json";
+  const res = await fetch(`${baseUrl}/api/automation/podcast${slugPath}`, {
+    method: body ? "POST" : "GET",
+    headers,
+    body: body ? JSON.stringify(body) : undefined,
+    signal: AbortSignal.timeout(130_000),
+  });
+  const result = await res.json().catch(() => null);
+  if (!res.ok || !result) throw new Error(result?.error || `Podcast writer returned ${res.status}`);
+  return result;
+}
+
+async function writeEpisode(episodesRoot) {
+  const baseUrl = (process.env.TWK_AUTOMATION_URL || "").replace(/\/$/, "");
+  const secret = process.env.AUTOMATION_INGEST_SECRET || "";
+  if (!baseUrl || !secret) {
+    throw new Error("--auto requires TWK_AUTOMATION_URL and AUTOMATION_INGEST_SECRET");
+  }
+  const params = new URLSearchParams({ format: "plan", minutes: args.minutes });
+  if (args.story) params.set("story", args.story);
+  for (const source of args.source ?? []) params.append("source", source);
+  const data = await fetchDraft(baseUrl, secret, `?${params}`);
+  if (!data.pending) {
+    log(`No episode queued (${data.reason || "none"}).`);
+    return null;
+  }
+  if (!data.plan) throw new Error("The TWK deployment does not support chapter drafting yet.");
+
+  const episode = data.plan;
+  const outDir = args.out ? path.resolve(args.out) : path.join(episodesRoot, episode.slug);
+  await mkdir(outDir, { recursive: true });
+  const checkpoint = path.join(outDir, "draft-progress.json");
+  const requestKey = `scenes:${params}`;
+  const previousDraft = await readFile(checkpoint, "utf8").then(JSON.parse).catch(() => null);
+  const progress = previousDraft?.requestKey === requestKey && previousDraft?.plan?.slug === data.plan.slug
+    ? previousDraft
+    : { requestKey, plan: data.plan, outlineModel: data.model, completed: [] };
+  log(`Target: ${progress.plan.targetMinutes} minutes across ${progress.plan.chapters.length} chapters. Outline: ${progress.outlineModel}`);
+
+  for (let scene = progress.completed.length; scene < progress.plan.chapters.length * 2; scene++) {
+    const index = Math.floor(scene / 2);
+    const part = scene % 2;
+    const previous = (progress.completed.at(-1)?.turns ?? []).slice(-3)
+      .map((turn) => `${turn.speaker}: ${turn.text}`).join("\n").slice(-1200);
+    const chapter = await fetchDraft(baseUrl, secret, "", {
+      action: "write-chapter",
+      plan: progress.plan,
+      index,
+      part,
+      previous,
+    });
+    progress.completed.push(chapter);
+    const pendingCheckpoint = `${checkpoint}.tmp`;
+    await writeFile(pendingCheckpoint, JSON.stringify(progress, null, 2));
+    await rename(pendingCheckpoint, checkpoint);
+    log(`Chapter ${index + 1}/${progress.plan.chapters.length}, scene ${part + 1}/2: ${chapter.words} words (${chapter.model})`);
+  }
+
+  const { chapters: _chapters, sources: savedSources, ...metadata } = progress.plan;
+  const script = {
+    ...metadata,
+    title: `Episode ${metadata.episodeNumber}: ${metadata.title.replace(/^Episode \d+:\s*/i, "")}`,
+    sources: savedSources.map(({ evidence, ...source }) => source),
+    turns: progress.completed.flatMap(({ turns }) => turns),
+    writerModels: [...new Set([progress.outlineModel, ...progress.completed.map(({ model }) => model)])],
+  };
+  await writeFile(path.join(outDir, "script.json"), JSON.stringify(script, null, 2));
+  await rm(checkpoint, { force: true });
+  return script;
+}
+
 async function main() {
   const episodesRoot = path.join(repoRoot, "podcast", "episodes");
   let script;
   let episodeSlug = args.episode;
 
   if (args.auto || !episodeSlug) {
-    const baseUrl = (process.env.TWK_AUTOMATION_URL || "").replace(/\/$/, "");
-    const secret = process.env.AUTOMATION_INGEST_SECRET || "";
-    if (!baseUrl || !secret) {
-      throw new Error("--auto requires TWK_AUTOMATION_URL and AUTOMATION_INGEST_SECRET");
-    }
-    const res = await fetch(`${baseUrl}/api/automation/podcast`, {
-      headers: { Authorization: `Bearer ${secret}` },
-      signal: AbortSignal.timeout(60_000),
-    });
-    if (!res.ok) throw new Error(`GET /api/automation/podcast ${res.status}: ${await res.text()}`);
-    const data = await res.json();
-    if (!data.pending || !data.script) {
-      log(`No episode queued (${data.reason || "none"}). Exiting cleanly.`);
-      return;
-    }
-    script = data.script;
+    script = await writeEpisode(episodesRoot);
+    if (!script) return;
     episodeSlug = script.slug;
   } else {
     const scriptPath = path.join(episodesRoot, episodeSlug, "script.json");
@@ -446,17 +520,16 @@ async function main() {
 
   const episodeDir = path.join(episodesRoot, episodeSlug);
   const outDir = args.out ? path.resolve(args.out) : episodeDir;
-  const ffmpegPath = await resolveFfmpeg();
-  const tmpDir = await mkdir(path.join(os.tmpdir(), `twk-podcast-${Date.now()}`), { recursive: true });
-
-  let activeProvider = args.provider;
+  const activeProvider = args.provider;
   log(`Episode: ${script.title} (${script.turns.length} turns) | Provider: ${activeProvider}`);
 
-  if (args["dry-run"]) {
-    log("Dry run complete. Script is valid.");
+  if (args["dry-run"] || args["draft-only"]) {
+    log("Draft complete.");
     return;
   }
 
+  const ffmpegPath = await resolveFfmpeg();
+  const tmpDir = await mkdir(path.join(os.tmpdir(), `twk-podcast-${Date.now()}`), { recursive: true });
   const pcmParts = [];
   const transcriptTurns = [];
   const chapters = [];
@@ -481,7 +554,9 @@ async function main() {
         });
         lastChapter = turn.chapter;
       } else if (i > 0) {
-        const gap = silence(TURN_GAP_S);
+        const gap = silence(Number.isFinite(turn.pauseBeforeMs)
+          ? Math.max(0, Math.min(1500, turn.pauseBeforeMs)) / 1000
+          : TURN_GAP_S);
         pcmParts.push(gap);
         cursorSamples += gap.length;
       }
@@ -491,33 +566,31 @@ async function main() {
         .split(/(\[sfx:(?:notes|paper)\])/i)
         .filter((seg) => seg.trim().length > 0);
       const turnChunks = [];
+      let noteFlip = false;
 
       for (let sIdx = 0; sIdx < segments.length; sIdx++) {
         const seg = segments[sIdx];
         if (/^\[sfx:(?:notes|paper)\]$/i.test(seg)) {
-          turnChunks.push(makeNoteFlipSfx());
+          noteFlip = true;
           continue;
         }
         const speechText = normalizeForSpeech(seg);
         if (!speechText) continue;
         let segSamples;
         if (activeProvider === "fish") {
-          try {
-            const mp3Buf = await synthFish(speechText, voice.fishId, args["fish-model"], voice.fishSpeed);
-            segSamples = await decodeAudioToFloat32(ffmpegPath, tmpDir, `${i}-${sIdx}`, mp3Buf, "mp3");
-          } catch (err) {
-            if (args["auto-fallback"] && err.fallbackable) {
-              log(`Fish Audio unavailable (${err.message}); falling back to Kokoro-82M.`);
-              activeProvider = "kokoro";
-              segSamples = await synthKokoro(speechText, voice.kokoroId);
-            } else {
-              throw err;
-            }
-          }
+          const speed = Number.isFinite(turn.speed) ? Math.max(0.9, Math.min(1.12, turn.speed)) : voice.fishSpeed;
+          const mp3Buf = await synthFishWithRetry(speechText, voice.fishId, args["fish-model"], speed);
+          segSamples = await decodeAudioToFloat32(ffmpegPath, tmpDir, `${i}-${sIdx}`, mp3Buf, "mp3");
         } else {
           segSamples = await synthKokoro(speechText, voice.kokoroId);
         }
-        turnChunks.push(trimSilence(segSamples));
+        const samples = trimSilence(segSamples);
+        if (noteFlip) {
+          const effect = makeNoteFlipSfx();
+          for (let j = 0; j < Math.min(samples.length, effect.length); j++) samples[j] += effect[j] * 0.45;
+          noteFlip = false;
+        }
+        turnChunks.push(samples);
       }
 
       const totalLen = turnChunks.reduce((sum, c) => sum + c.length, 0);
@@ -551,6 +624,8 @@ async function main() {
     await mkdir(outDir, { recursive: true });
     const wavPath = path.join(tmpDir, "episode.wav");
     const mp3Path = path.join(outDir, "episode.mp3");
+    const seconds = cursorSamples / SAMPLE_RATE;
+    const bitrate = [128, 112, 96, 80, 64, 56, 48].find((rate) => (rate * 1000 * seconds) / 8 < 46_000_000) ?? 48;
     await writeFile(wavPath, encodeWav(pcmParts));
 
     await runFfmpeg(ffmpegPath, [
@@ -561,12 +636,14 @@ async function main() {
       "loudnorm=I=-16:TP=-1.5:LRA=11",
       "-codec:a",
       "libmp3lame",
+      "-ar",
+      "24000",
       "-b:a",
-      "128k",
+      `${bitrate}k`,
       mp3Path,
     ]);
 
-    const mp3Stat = await readFile(mp3Path);
+    const mp3Stat = await stat(mp3Path);
     const durationSeconds = Number((cursorSamples / SAMPLE_RATE).toFixed(2));
 
     const transcriptDoc = {
@@ -586,7 +663,7 @@ async function main() {
       description: script.description,
       publishedAt: script.publishedAt || new Date().toISOString(),
       durationSeconds,
-      bytes: mp3Stat.byteLength,
+      bytes: mp3Stat.size,
       provider: activeProvider,
       model: activeProvider === "fish" ? args["fish-model"] : KOKORO_MODEL_ID,
       hosts: {
@@ -602,9 +679,10 @@ async function main() {
     await writeFile(path.join(outDir, "manifest.json"), JSON.stringify(manifestDoc, null, 2), "utf8");
     await rebuildRssFeed(episodesRoot);
 
-    log(`Done! ${mp3Path} (${(mp3Stat.byteLength / 1024 / 1024).toFixed(2)} MB, ${durationSeconds}s)`);
+    log(`Done! ${mp3Path} (${(mp3Stat.size / 1024 / 1024).toFixed(2)} MB, ${durationSeconds}s)`);
 
     if (args.publish) {
+      if (mp3Stat.size > 50_000_000) throw new Error("The rendered MP3 exceeds the Supabase upload limit. The local file is ready for larger-object hosting.");
       await publishToTwk(script.slug, outDir, episodesRoot);
     }
   } finally {
