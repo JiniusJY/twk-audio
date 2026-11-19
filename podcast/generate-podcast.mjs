@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Generates multi-speaker TechWhoKnows podcast episodes with exact millisecond
+ * Generates multi-speaker Who Knows (the TechWhoKnows podcast) episodes with exact millisecond
  * transcript timestamps, chapter markers, and a Podcast RSS 2.0 feed.
  *
  * Supports two TTS providers:
@@ -49,6 +49,19 @@ const SAMPLE_RATE = 24000;
 const TURN_GAP_S = 0.18;
 const CHAPTER_GAP_S = 0.55;
 const KOKORO_MODEL_ID = "onnx-community/Kokoro-82M-v1.0-ONNX";
+
+// Who Knows audio kit (owner rule, 19 November 2026): every episode opens on the show's tune, plays a
+// short sting before the mid-roll subscribe ask, and closes on the outro. The clips are the instrumental
+// opening of the "How did they get away with this" series song, cut by Reel Studio
+// projects/podcast/who-knows/kit/make-kit.sh. The first host line comes in at INTRO_LEAD_S, over the
+// intro as it ducks and fades. The subscribe turns (segment: "subscribe") are written by the site
+// (lib/podcast-writing.ts subscribeBreakTurns), so a script without them is refused.
+const SHOW_NAME = "Who Knows";
+const KIT_DIR = path.join(here, "kit");
+const INTRO_LEAD_S = 6;
+const MIDROLL_BEFORE_S = 0.35;
+const MIDROLL_AFTER_S = 0.25;
+const OUTRO_GAP_S = 0.5;
 
 const DEFAULT_VOICES = {
   A: {
@@ -416,7 +429,7 @@ async function rebuildRssFeed(episodesRoot) {
   const rss = `<?xml version="1.0" encoding="UTF-8"?>
 <rss version="2.0" xmlns:itunes="http://www.itunes.com/dtds/podcast-1.0.dtd" xmlns:atom="http://www.w3.org/2005/Atom">
   <channel>
-    <title>TechWhoKnows Deep Dive</title>
+    <title>${SHOW_NAME}</title>
     <link>https://techwhoknows.com/podcasts</link>
     <description>In-depth AI-hosted technical briefings on AI infrastructure, startups, cybersecurity, and Asia-Pacific technology from TechWhoKnows.</description>
     <language>en-sg</language>
@@ -531,6 +544,10 @@ async function main() {
     return;
   }
 
+  if (!script.turns.some((turn) => turn.segment === "subscribe")) {
+    throw new Error("The script has no mid-roll subscribe ask (segment: \"subscribe\"). Draft it through the TWK site, which adds the ask, before rendering.");
+  }
+
   const ffmpegPath = await resolveFfmpeg();
   const tmpDir = await mkdir(path.join(os.tmpdir(), `twk-podcast-${Date.now()}`), { recursive: true });
   const pcmParts = [];
@@ -540,12 +557,26 @@ async function main() {
   let lastChapter = null;
 
   try {
+    const kit = {};
+    for (const name of ["intro", "midroll", "outro"]) {
+      kit[name] = await decodeAudioToFloat32(ffmpegPath, tmpDir, `kit-${name}`, await readFile(path.join(KIT_DIR, `${name}.mp3`)), "mp3");
+    }
+    // The intro's first INTRO_LEAD_S play alone; the rest is mixed under the opening lines below.
+    const introLead = Math.min(kit.intro.length, Math.round(INTRO_LEAD_S * SAMPLE_RATE));
+    pcmParts.push(kit.intro.slice(0, introLead));
+    cursorSamples += introLead;
+
     for (let i = 0; i < script.turns.length; i++) {
       const turn = script.turns[i];
       const speakerKey = turn.speaker === "B" ? "B" : "A";
       const voice = DEFAULT_VOICES[speakerKey];
 
-      if (turn.chapter && turn.chapter !== lastChapter) {
+      if (turn.segment === "subscribe" && script.turns[i - 1]?.segment !== "subscribe") {
+        for (const part of [silence(MIDROLL_BEFORE_S), kit.midroll, silence(MIDROLL_AFTER_S)]) {
+          pcmParts.push(part);
+          cursorSamples += part.length;
+        }
+      } else if (turn.chapter && turn.chapter !== lastChapter) {
         if (i > 0) {
           const gap = silence(CHAPTER_GAP_S);
           pcmParts.push(gap);
@@ -619,10 +650,26 @@ async function main() {
         endMs,
         text: stripDeliveryTags(turn.text),
         citations: turn.citations || [],
+        ...(turn.segment === "subscribe" ? { segment: "subscribe" } : {}),
       });
 
       log(`  Turn ${i + 1}/${script.turns.length} (${voice.name}): ${((endMs - startMs) / 1000).toFixed(1)}s`);
     }
+
+    for (const part of [silence(OUTRO_GAP_S), kit.outro]) {
+      pcmParts.push(part);
+      cursorSamples += part.length;
+    }
+    const mixed = new Float32Array(cursorSamples);
+    let at = 0;
+    for (const part of pcmParts) {
+      mixed.set(part, at);
+      at += part.length;
+    }
+    const introTail = kit.intro.subarray(introLead);
+    for (let j = 0; j < introTail.length && introLead + j < mixed.length; j++) mixed[introLead + j] += introTail[j];
+    pcmParts.length = 0;
+    pcmParts.push(mixed);
 
     await mkdir(outDir, { recursive: true });
     const wavPath = path.join(tmpDir, "episode.wav");
@@ -675,7 +722,8 @@ async function main() {
       },
       chapters,
       sources: script.sources || [],
-      aiDisclosure: "AI-hosted technical deep dive produced by TechWhoKnows.",
+      aiDisclosure: `${SHOW_NAME} is AI-hosted and produced by TechWhoKnows.`,
+      audioKit: "who-knows-v1",
     };
 
     await writeFile(path.join(outDir, "transcript.json"), JSON.stringify(transcriptDoc, null, 2), "utf8");
