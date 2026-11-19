@@ -439,7 +439,7 @@ async function fetchDraft(baseUrl, secret, slugPath, body) {
     method: body ? "POST" : "GET",
     headers,
     body: body ? JSON.stringify(body) : undefined,
-    signal: AbortSignal.timeout(130_000),
+    signal: AbortSignal.timeout(230_000),
   });
   const result = await res.json().catch(() => null);
   if (!res.ok || !result) throw new Error(result?.error || `Podcast writer returned ${res.status}`);
