@@ -28,6 +28,7 @@ const { values: args } = parseArgs({
     episode: { type: "string" },
     auto: { type: "boolean", default: false },
     story: { type: "string" },
+    writer: { type: "string" },
     source: { type: "string", multiple: true },
     minutes: { type: "string", default: "30" },
     "draft-only": { type: "boolean", default: false },
@@ -453,6 +454,7 @@ async function writeEpisode(episodesRoot) {
   }
   const params = new URLSearchParams({ format: "plan", minutes: args.minutes });
   if (args.story) params.set("story", args.story);
+  if (args.writer) params.set("writer", args.writer);
   for (const source of args.source ?? []) params.append("source", source);
   const data = await fetchDraft(baseUrl, secret, `?${params}`);
   if (!data.pending) {
@@ -483,6 +485,7 @@ async function writeEpisode(episodesRoot) {
       index,
       part,
       previous,
+      writer: args.writer,
     });
     progress.completed.push(chapter);
     const pendingCheckpoint = `${checkpoint}.tmp`;

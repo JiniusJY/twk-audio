@@ -16,6 +16,8 @@ on:
         description: "TWK story slug. Required for specials over 30 minutes."
       sources:
         description: "Optional supporting TWK story slugs, separated by spaces."
+      writer:
+        description: "Optional NVIDIA NIM writer (nim:publisher/model)"
       publish:
         description: "Publish the rendered episode"
         type: boolean
@@ -39,6 +41,7 @@ jobs:
       PODCAST_MINUTES: ${{ github.event.inputs.minutes || github.event.client_payload.minutes || '30' }}
       PODCAST_STORY: ${{ github.event.inputs.story || github.event.client_payload.story }}
       PODCAST_SOURCES: ${{ github.event.inputs.sources || github.event.client_payload.sources }}
+      PODCAST_WRITER: ${{ github.event.inputs.writer || github.event.client_payload.writer }}
       PODCAST_PUBLISH: ${{ github.event_name != 'workflow_dispatch' || inputs.publish }}
       TTS_PROVIDER: fish
       FISH_AUDIO_MODEL: ${{ vars.FISH_AUDIO_MODEL || 's2.1-pro-free' }}
@@ -73,6 +76,7 @@ jobs:
           if [[ "$EPISODE" == "auto" ]]; then
             args+=(--auto --minutes "$PODCAST_MINUTES")
             if [[ -n "$PODCAST_STORY" ]]; then args+=(--story "$PODCAST_STORY"); fi
+            if [[ -n "$PODCAST_WRITER" ]]; then args+=(--writer "$PODCAST_WRITER"); fi
             read -r -a sources <<< "$PODCAST_SOURCES"
             for source in "${sources[@]}"; do args+=(--source "$source"); done
           else
@@ -85,7 +89,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           if-no-files-found: ignore
-          name: podcast-${{ env.EPISODE }}
+          name: podcast-${{ env.EPISODE }}-${{ github.run_attempt }}
           path: |
             podcast/episodes/*/script.json
             podcast/episodes/*/draft-progress.json
