@@ -63,10 +63,21 @@ jobs:
 
       - name: Install dependencies
         if: steps.deps.outputs.cache-hit != 'true'
-        run: npm ci --no-audit --no-fund
+        run: npm ci --no-audit --no-fund --onnxruntime-node-install-cuda=skip
 
       - name: Run unit tests
         run: npm test
+
+      - name: Restore reusable podcast work
+        id: podcast-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: .cache/podcast
+          # Caches are immutable. Each attempt saves a new snapshot; restores use
+          # the latest one. The code content-checks each individual entry.
+          key: podcast-work-v1-${{ runner.os }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            podcast-work-v1-${{ runner.os }}-
 
       - name: Generate podcast episode
         run: |
@@ -86,6 +97,13 @@ jobs:
             args+=(--episode "$EPISODE")
           fi
           node podcast/generate-podcast.mjs "${args[@]}"
+
+      - name: Save reusable podcast work (including failed runs)
+        if: always() && steps.podcast-cache.outcome == 'success'
+        uses: actions/cache/save@v4
+        with:
+          path: .cache/podcast
+          key: ${{ steps.podcast-cache.outputs.cache-primary-key }}
 
       - name: Upload episode artifacts
         if: always()

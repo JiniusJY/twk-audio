@@ -38,3 +38,37 @@ Pure helpers (chunking, trimming, WAV encoding, speech normalization, retry and 
 ## Secrets
 
 The workflow needs two repository secrets, `TWK_AUTOMATION_URL` and `AUTOMATION_INGEST_SECRET`. GitHub masks them in logs, and workflows triggered by pull requests from forks don't receive them.
+
+### Podcast workflow reuse
+
+The podcast workflow keeps the existing shared `node_modules` cache and also
+restores `.cache/podcast` before generation. It saves a new snapshot after both
+successful and failed generations, so a retry can reuse completed work:
+
+- Draft scenes are keyed by the full current plan and request options. The site
+  is still asked for the current plan first. Changed plans are drafted afresh;
+  metadata and source evidence are not stored in the draft cache.
+- Fish MP3 segments are keyed by normalized speech text, voice, speed, model,
+  and synthesis settings. Changed segments alone need new synthesis. A fallback
+  result is stored under the model actually requested for that response.
+- Cached audio must decode to nonempty finite samples. Invalid entries are
+  discarded and synthesized again. Voice settings, order, mix, and publishing
+  checks are unchanged. Logs report hit/miss counts.
+- The local work cache is capped at 512 MiB by pruning old entries. Cache misses,
+  expiry, or eviction only cause recomputation. A completely new episode still
+  needs drafting and speech, so this mostly speeds retries and revisions, not
+  first-time generation of new material.
+
+Set `TWK_PODCAST_CACHE_DIR` to change its local location. Delete `.cache/podcast`
+to force fresh synthesis. Cache snapshots contain generated scripts/audio, not
+credentials. As with other GitHub Actions caches in this public repository,
+assume their contents can be read by repository users: never put secrets or
+unpublished confidential material in this cache.
+
+Both workflows skip ONNX's optional CUDA download on CPU-only GitHub runners.
+The CPU runtime is still installed; Fish remains the production podcast voice.
+
+`node scripts/benchmark-cache.mjs` runs a local mock writer/TTS service, renders
+twice through real ffmpeg, and checks that the warm render makes no writer/TTS
+calls and produces a byte-identical MP3. It does not call Fish or publish.
+The Audio tests workflow runs this check and the unit tests on code changes.

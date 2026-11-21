@@ -1,0 +1,35 @@
+name: Audio tests
+on:
+  push:
+    paths:
+      - '*.mjs'
+      - 'podcast/*.mjs'
+      - 'test/**'
+      - 'scripts/**'
+      - 'package*.json'
+      - '.github/workflows/**'
+  pull_request:
+    paths:
+      - '*.mjs'
+      - 'podcast/*.mjs'
+      - 'test/**'
+      - 'scripts/**'
+      - 'package*.json'
+      - '.github/workflows/**'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci --no-audit --no-fund --onnxruntime-node-install-cuda=skip
+      - run: npm test
+      - name: Mocked cold/warm render benchmark (no external API calls)
+        run: node scripts/benchmark-cache.mjs

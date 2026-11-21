@@ -77,3 +77,19 @@ test("mapWithConcurrency never exceeds the in-flight limit", async () => {
   assert.ok(peak <= 3, `peak concurrency ${peak}`);
   assert.ok(peak >= 2, `expected actual parallelism, got peak ${peak}`);
 });
+
+test("mapWithConcurrency drains active workers and stops new work after failure", async () => {
+  let finished = false;
+  const started = [];
+  await assert.rejects(() => mapWithConcurrency([0, 1, 2, 3], 2, async (n) => {
+    started.push(n);
+    if (n === 0) {
+      await new Promise((resolve) => setTimeout(resolve, 2));
+      throw new Error("test failure");
+    }
+    await new Promise((resolve) => setTimeout(resolve, 15));
+    finished = true;
+  }), /test failure/);
+  assert.equal(finished, true);
+  assert.deepEqual(started, [0, 1]);
+});

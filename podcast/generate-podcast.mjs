@@ -17,9 +17,12 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
+import { cacheKey, readCache, writeCache, pruneCache } from "./cache.mjs";
+import { cachedSpeech, speechIdentity } from "./speech-cache.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(here, "..");
+const CACHE_DIR = process.env.TWK_PODCAST_CACHE_DIR || path.join(repoRoot, ".cache", "podcast");
 
 const { values: args } = parseArgs({
   allowNegative: true,
@@ -76,15 +79,25 @@ async function withRetry(fn, { attempts = 3, baseMs = 2000, label = "request", r
 async function mapWithConcurrency(items, limit, worker) {
   const results = new Array(items.length);
   let next = 0;
+  let stopped = false;
   async function run() {
-    while (next < items.length) {
+    while (!stopped && next < items.length) {
       const index = next++;
-      results[index] = await worker(items[index], index);
+      try {
+        results[index] = await worker(items[index], index);
+      } catch (error) {
+        stopped = true;
+        throw error;
+      }
     }
   }
   const lanes = [];
   for (let w = 0; w < Math.min(limit, items.length); w++) lanes.push(run());
-  await Promise.all(lanes);
+  // Let in-flight work finish before callers clean up scratch files or save a
+  // checkpoint. Otherwise one rejected lane races still-running decoders.
+  const settled = await Promise.allSettled(lanes);
+  const failed = settled.find((result) => result.status === "rejected");
+  if (failed) throw failed.reason;
   return results;
 }
 
@@ -323,6 +336,7 @@ function normalizeForSpeech(rawText) {
 }
 
 async function synthFish(text, referenceId, speed = 1.05) {
+  const requestedModel = activeFishModel;
   const apiKey = process.env.FISH_AUDIO_API_KEY;
   if (apiKey) {
     const res = await fetch("https://api.fish.audio/v1/tts", {
@@ -330,7 +344,7 @@ async function synthFish(text, referenceId, speed = 1.05) {
       headers: {
         Authorization: `Bearer ${apiKey}`,
         "Content-Type": "application/json",
-        model: activeFishModel,
+        model: requestedModel,
       },
       body: JSON.stringify({
         text,
@@ -354,7 +368,7 @@ async function synthFish(text, referenceId, speed = 1.05) {
       err.fallbackable = res.status === 401 || res.status === 402 || res.status === 403 || res.status === 429;
       throw err;
     }
-    return Buffer.from(await res.arrayBuffer());
+    return { audio: Buffer.from(await res.arrayBuffer()), model: requestedModel };
   }
 
   // Relay through Vercel (TWK) where FISH_AUDIO_API_KEY is stored.
@@ -375,7 +389,7 @@ async function synthFish(text, referenceId, speed = 1.05) {
       action: "tts",
       text,
       referenceId,
-      model: activeFishModel,
+      model: requestedModel,
       temperature: 0.84,
       topP: 0.86,
       speed,
@@ -389,17 +403,18 @@ async function synthFish(text, referenceId, speed = 1.05) {
     err.fallbackable = [401, 402, 403, 429, 503].includes(res.status);
     throw err;
   }
-  return Buffer.from(await res.arrayBuffer());
+  return { audio: Buffer.from(await res.arrayBuffer()), model: requestedModel };
 }
 
 let kokoroInstance = null;
 async function synthFishWithRetry(...input) {
+  const initiallyRequestedModel = activeFishModel;
   try {
     return await withRetry(() => synthFish(...input), { attempts: 4, baseMs: 2000, label: "Fish TTS" });
   } catch (error) {
     // The plan can't use the paid model (402/401/403): drop to the free tier for the rest of the run.
     const authFailure = error.status === 401 || error.status === 402 || error.status === 403;
-    if (authFailure && activeFishModel !== FREE_FISH_MODEL) {
+    if (authFailure && initiallyRequestedModel !== FREE_FISH_MODEL) {
       if (!fishFallbackLogged) {
         log(`Fish model ${activeFishModel} unavailable (${error.status}); falling back to ${FREE_FISH_MODEL} for this run.`);
         fishFallbackLogged = true;
@@ -543,21 +558,29 @@ async function writeEpisode(episodesRoot) {
   const outDir = args.out ? path.resolve(args.out) : path.join(episodesRoot, episode.slug);
   await mkdir(outDir, { recursive: true });
   const checkpoint = path.join(outDir, "draft-progress.json");
+  // Always fetch the current plan first. A new source, outline, duration, writer,
+  // or episode metadata invalidates reuse instead of resurrecting a stale draft.
   const requestKey = `scenes:${params}`;
-  const previousDraft = await readFile(checkpoint, "utf8").then(JSON.parse).catch(() => null);
-  const progress = previousDraft?.requestKey === requestKey && previousDraft?.plan?.slug === data.plan.slug
-    ? previousDraft
-    : { requestKey, plan: data.plan, outlineModel: data.model, completed: [] };
-  log(`Target: ${progress.plan.targetMinutes} minutes across ${progress.plan.chapters.length} chapters. Outline: ${progress.outlineModel}`);
+  const draftKey = cacheKey({ schema: 1, requestKey, plan: episode });
+  const localDraft = await readFile(checkpoint, "utf8").then(JSON.parse).catch(() => null);
+  const previousDraft = await readCache(CACHE_DIR, "drafts", draftKey)
+    .then((raw) => raw ? JSON.parse(raw.toString("utf8")) : null).catch(() => null);
+  const reusableDraft = previousDraft || (localDraft?.draftKey === draftKey ? localDraft : null);
+  const progress = reusableDraft?.requestKey === requestKey && Array.isArray(reusableDraft.completed)
+    && reusableDraft.completed.length <= episode.chapters.length * 2
+    && reusableDraft.completed.every((chapter) => Array.isArray(chapter.turns) && chapter.turns.length > 0)
+    ? reusableDraft
+    : { draftKey, requestKey, outlineModel: data.model, completed: [] };
+  log(`Target: ${episode.targetMinutes} minutes across ${episode.chapters.length} chapters. Outline: ${progress.outlineModel}. Reused ${progress.completed.length} scenes.`);
 
-  for (let scene = progress.completed.length; scene < progress.plan.chapters.length * 2; scene++) {
+  for (let scene = progress.completed.length; scene < episode.chapters.length * 2; scene++) {
     const index = Math.floor(scene / 2);
     const part = scene % 2;
     const previous = (progress.completed.at(-1)?.turns ?? []).slice(-3)
       .map((turn) => `${turn.speaker}: ${turn.text}`).join("\n").slice(-1200);
     const chapter = await fetchDraft(baseUrl, secret, "", {
       action: "write-chapter",
-      plan: progress.plan,
+      plan: episode,
       index,
       part,
       previous,
@@ -567,10 +590,13 @@ async function writeEpisode(episodesRoot) {
     const pendingCheckpoint = `${checkpoint}.tmp`;
     await writeFile(pendingCheckpoint, JSON.stringify(progress, null, 2));
     await rename(pendingCheckpoint, checkpoint);
-    log(`Chapter ${index + 1}/${progress.plan.chapters.length}, scene ${part + 1}/2: ${chapter.words} words (${chapter.model})`);
+    await writeCache(CACHE_DIR, "drafts", draftKey, JSON.stringify(progress)).catch((error) => {
+      log(`Draft cache write skipped: ${error.code || error.message}`);
+    });
+    log(`Chapter ${index + 1}/${episode.chapters.length}, scene ${part + 1}/2: ${chapter.words} words (${chapter.model})`);
   }
 
-  const { chapters: _chapters, sources: savedSources, ...metadata } = progress.plan;
+  const { chapters: _chapters, sources: savedSources, ...metadata } = episode;
   const script = {
     ...metadata,
     title: `Episode ${metadata.episodeNumber}: ${metadata.title.replace(/^Episode \d+:\s*/i, "")}`,
@@ -636,6 +662,8 @@ async function main() {
     // Synthesis dominates render time, so all turns are voiced first with a few requests in
     // flight, then assembled in script order. Assembly (gaps, kit, timestamps) is unchanged.
     const synthStarted = Date.now();
+    let speechHits = 0;
+    let speechMisses = 0;
     const renderedTurns = await mapWithConcurrency(script.turns, SYNTH_CONCURRENCY, async (turn, i) => {
       const speakerKey = turn.speaker === "B" ? "B" : "A";
       const voice = DEFAULT_VOICES[speakerKey];
@@ -657,8 +685,15 @@ async function main() {
         let segSamples;
         if (activeProvider === "fish") {
           const speed = Number.isFinite(turn.speed) ? Math.max(0.9, Math.min(1.12, turn.speed)) : voice.fishSpeed;
-          const mp3Buf = await synthFishWithRetry(speechText, voice.fishId, speed);
-          segSamples = await decodeAudioToFloat32(ffmpegPath, tmpDir, `${i}-${sIdx}`, mp3Buf, "mp3");
+          const { samples, hit } = await cachedSpeech({
+            root: CACHE_DIR,
+            identity: speechIdentity({ text: speechText, voice: voice.fishId, speed, model: activeFishModel }),
+            synthesize: () => synthFishWithRetry(speechText, voice.fishId, speed),
+            decode: (audio) => decodeAudioToFloat32(ffmpegPath, tmpDir, `${i}-${sIdx}`, audio, "mp3"),
+            warn: log,
+          });
+          if (hit) speechHits++; else speechMisses++;
+          segSamples = samples;
         } else {
           segSamples = await synthKokoro(speechText, voice.kokoroId);
         }
@@ -680,7 +715,7 @@ async function main() {
       }
       return trimmed;
     });
-    log(`Voiced ${script.turns.length} turns in ${((Date.now() - synthStarted) / 1000).toFixed(0)}s (${SYNTH_CONCURRENCY} in flight)`);
+    log(`Voiced ${script.turns.length} turns in ${((Date.now() - synthStarted) / 1000).toFixed(0)}s (${SYNTH_CONCURRENCY} in flight; speech cache ${speechHits} hits, ${speechMisses} misses)`);
 
     for (let i = 0; i < script.turns.length; i++) {
       const turn = script.turns[i];
@@ -888,8 +923,10 @@ const isDirectRun = process.argv[1] && path.resolve(process.argv[1]) === fileURL
 if (isDirectRun) {
   main().catch((err) => {
     console.error("[twk-podcast] FATAL:", err);
-    process.exit(1);
-  });
+    process.exitCode = 1;
+  }).finally(() => pruneCache(CACHE_DIR).catch((error) => {
+    log(`Cache cleanup skipped: ${error.code || error.message}`);
+  }));
 }
 
 export { normalizeForSpeech, stripDeliveryTags, trimSilence, encodeWav, makeNoteFlipSfx, withRetry, mapWithConcurrency };
