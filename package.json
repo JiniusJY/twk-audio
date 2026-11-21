@@ -5,7 +5,8 @@
   "description": "Generates Listen audio for TechWhoKnows articles with Kokoro.",
   "scripts": {
     "generate": "node generate.mjs",
-    "podcast": "node podcast/generate-podcast.mjs"
+    "podcast": "node podcast/generate-podcast.mjs",
+    "test": "node --test"
   },
   "dependencies": {
     "ffmpeg-static": "^5.2.0",

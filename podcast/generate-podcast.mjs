@@ -15,7 +15,6 @@ import { spawn } from "node:child_process";
 import { mkdir, readdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 
@@ -40,15 +39,54 @@ const { values: args } = parseArgs({
   },
 });
 
-if (!args.episode && !args.auto) {
-  console.error("Provide --episode <slug> or --auto");
-  process.exit(1);
-}
 
 const SAMPLE_RATE = 24000;
 const TURN_GAP_S = 0.18;
 const CHAPTER_GAP_S = 0.55;
 const KOKORO_MODEL_ID = "onnx-community/Kokoro-82M-v1.0-ONNX";
+const FREE_FISH_MODEL = "s2.1-pro-free";
+// Synthesis requests run this many at a time. Fish latency dominates a render, so overlapping
+// turns cuts wall-clock time roughly by this factor while assembly stays in script order.
+const SYNTH_CONCURRENCY = Math.max(1, Math.min(6, Number(process.env.TWK_SYNTH_CONCURRENCY || 3)));
+// The active Fish model can drop to the free tier mid-run if the plan rejects the paid one.
+let activeFishModel = args["fish-model"];
+let fishFallbackLogged = false;
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/** Retries transient failures (network errors, timeouts, 429 and 5xx) with backoff. 4xx fails fast. */
+async function withRetry(fn, { attempts = 3, baseMs = 2000, label = "request", retryIf = null } = {}) {
+  let last;
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    try {
+      return await fn();
+    } catch (error) {
+      last = error;
+      const retryable = (!error.status || error.status === 429 || error.status >= 500) || (retryIf && retryIf(error));
+      if (!retryable || attempt === attempts) throw error;
+      const wait = baseMs * 2 ** (attempt - 1);
+      log(`${label} failed (${String(error.message).slice(0, 200)}); retrying in ${(wait / 1000).toFixed(0)}s (${attempt}/${attempts - 1})`);
+      await sleep(wait);
+    }
+  }
+  throw last;
+}
+
+/** Maps items through worker with at most `limit` in flight, preserving input order in the results. */
+async function mapWithConcurrency(items, limit, worker) {
+  const results = new Array(items.length);
+  let next = 0;
+  async function run() {
+    while (next < items.length) {
+      const index = next++;
+      results[index] = await worker(items[index], index);
+    }
+  }
+  const lanes = [];
+  for (let w = 0; w < Math.min(limit, items.length); w++) lanes.push(run());
+  await Promise.all(lanes);
+  return results;
+}
 
 // Who Knows audio kit (owner rule, 19 November 2026): every episode opens on the show's tune, plays a
 // short sting before the mid-roll subscribe ask, and closes on the outro. The clips are the instrumental
@@ -284,7 +322,7 @@ function normalizeForSpeech(rawText) {
     .trim();
 }
 
-async function synthFish(text, referenceId, model, speed = 1.05) {
+async function synthFish(text, referenceId, speed = 1.05) {
   const apiKey = process.env.FISH_AUDIO_API_KEY;
   if (apiKey) {
     const res = await fetch("https://api.fish.audio/v1/tts", {
@@ -292,7 +330,7 @@ async function synthFish(text, referenceId, model, speed = 1.05) {
       headers: {
         Authorization: `Bearer ${apiKey}`,
         "Content-Type": "application/json",
-        model,
+        model: activeFishModel,
       },
       body: JSON.stringify({
         text,
@@ -307,7 +345,7 @@ async function synthFish(text, referenceId, model, speed = 1.05) {
           normalize_loudness: true,
         },
       }),
-      signal: AbortSignal.timeout(45_000),
+      signal: AbortSignal.timeout(120_000),
     });
     if (!res.ok) {
       const body = await res.text().catch(() => "");
@@ -337,12 +375,12 @@ async function synthFish(text, referenceId, model, speed = 1.05) {
       action: "tts",
       text,
       referenceId,
-      model,
+      model: activeFishModel,
       temperature: 0.84,
       topP: 0.86,
       speed,
     }),
-    signal: AbortSignal.timeout(45_000),
+    signal: AbortSignal.timeout(120_000),
   });
   if (!res.ok) {
     const body = await res.text().catch(() => "");
@@ -357,11 +395,19 @@ async function synthFish(text, referenceId, model, speed = 1.05) {
 let kokoroInstance = null;
 async function synthFishWithRetry(...input) {
   try {
-    return await synthFish(...input);
+    return await withRetry(() => synthFish(...input), { attempts: 4, baseMs: 2000, label: "Fish TTS" });
   } catch (error) {
-    if (error.status !== 429 && !(error.status >= 500) && error.name !== "TimeoutError") throw error;
-    await delay(4000);
-    return synthFish(...input);
+    // The plan can't use the paid model (402/401/403): drop to the free tier for the rest of the run.
+    const authFailure = error.status === 401 || error.status === 402 || error.status === 403;
+    if (authFailure && activeFishModel !== FREE_FISH_MODEL) {
+      if (!fishFallbackLogged) {
+        log(`Fish model ${activeFishModel} unavailable (${error.status}); falling back to ${FREE_FISH_MODEL} for this run.`);
+        fishFallbackLogged = true;
+      }
+      activeFishModel = FREE_FISH_MODEL;
+      return withRetry(() => synthFish(...input), { attempts: 4, baseMs: 2000, label: "Fish TTS (free)" });
+    }
+    throw error;
   }
 }
 
@@ -445,7 +491,7 @@ ${itemsXml}
   log(`Updated RSS feed (${manifests.length} episode(s)) -> ${path.relative(repoRoot, path.join(episodesRoot, "feed.xml"))}`);
 }
 
-async function fetchDraft(baseUrl, secret, slugPath, body) {
+async function fetchDraftOnce(baseUrl, secret, slugPath, body) {
   const headers = { Authorization: `Bearer ${secret}` };
   if (body) headers["Content-Type"] = "application/json";
   const res = await fetch(`${baseUrl}/api/automation/podcast${slugPath}`, {
@@ -455,8 +501,25 @@ async function fetchDraft(baseUrl, secret, slugPath, body) {
     signal: AbortSignal.timeout(310_000),
   });
   const result = await res.json().catch(() => null);
-  if (!res.ok || !result) throw new Error(result?.error || `Podcast writer returned ${res.status}`);
+  if (!res.ok || !result) {
+    const err = new Error(result?.error || `Podcast writer returned ${res.status}`);
+    err.status = res.status;
+    throw err;
+  }
   return result;
+}
+
+function fetchDraft(baseUrl, secret, slugPath, body, { attempts = 3, retryWriterErrors = false } = {}) {
+  return withRetry(() => fetchDraftOnce(baseUrl, secret, slugPath, body), {
+    attempts,
+    baseMs: 4000,
+    label: body?.action === "write-chapter" ? "write-chapter" : "podcast writer",
+    // A chapter that fails the word-count/JSON validation is a transient model miss, not a dead run:
+    // the next drafting attempt usually lands inside the range.
+    retryIf: retryWriterErrors
+      ? (error) => /did not return a valid|invalid or incomplete/i.test(String(error.message))
+      : null,
+  });
 }
 
 async function writeEpisode(episodesRoot) {
@@ -499,7 +562,7 @@ async function writeEpisode(episodesRoot) {
       part,
       previous,
       writer: args.writer,
-    });
+    }, { attempts: 4, retryWriterErrors: true });
     progress.completed.push(chapter);
     const pendingCheckpoint = `${checkpoint}.tmp`;
     await writeFile(pendingCheckpoint, JSON.stringify(progress, null, 2));
@@ -521,6 +584,10 @@ async function writeEpisode(episodesRoot) {
 }
 
 async function main() {
+  if (!args.episode && !args.auto) {
+    console.error("Provide --episode <slug> or --auto");
+    process.exit(1);
+  }
   const episodesRoot = path.join(repoRoot, "podcast", "episodes");
   let script;
   let episodeSlug = args.episode;
@@ -566,10 +633,60 @@ async function main() {
     pcmParts.push(kit.intro.slice(0, introLead));
     cursorSamples += introLead;
 
+    // Synthesis dominates render time, so all turns are voiced first with a few requests in
+    // flight, then assembled in script order. Assembly (gaps, kit, timestamps) is unchanged.
+    const synthStarted = Date.now();
+    const renderedTurns = await mapWithConcurrency(script.turns, SYNTH_CONCURRENCY, async (turn, i) => {
+      const speakerKey = turn.speaker === "B" ? "B" : "A";
+      const voice = DEFAULT_VOICES[speakerKey];
+      const rawSpeechSource = turn.ttsText || turn.text;
+      const segments = rawSpeechSource
+        .split(/(\[sfx:(?:notes|paper)\])/i)
+        .filter((seg) => seg.trim().length > 0);
+      const turnChunks = [];
+      let noteFlip = false;
+
+      for (let sIdx = 0; sIdx < segments.length; sIdx++) {
+        const seg = segments[sIdx];
+        if (/^\[sfx:(?:notes|paper)\]$/i.test(seg)) {
+          noteFlip = true;
+          continue;
+        }
+        const speechText = normalizeForSpeech(seg);
+        if (!speechText) continue;
+        let segSamples;
+        if (activeProvider === "fish") {
+          const speed = Number.isFinite(turn.speed) ? Math.max(0.9, Math.min(1.12, turn.speed)) : voice.fishSpeed;
+          const mp3Buf = await synthFishWithRetry(speechText, voice.fishId, speed);
+          segSamples = await decodeAudioToFloat32(ffmpegPath, tmpDir, `${i}-${sIdx}`, mp3Buf, "mp3");
+        } else {
+          segSamples = await synthKokoro(speechText, voice.kokoroId);
+        }
+        const samples = trimSilence(segSamples);
+        if (noteFlip) {
+          const effect = makeNoteFlipSfx();
+          for (let j = 0; j < Math.min(samples.length, effect.length); j++) samples[j] += effect[j] * 0.45;
+          noteFlip = false;
+        }
+        turnChunks.push(samples);
+      }
+
+      const totalLen = turnChunks.reduce((sum, c) => sum + c.length, 0);
+      const trimmed = new Float32Array(totalLen);
+      let writeOffset = 0;
+      for (const chunk of turnChunks) {
+        trimmed.set(chunk, writeOffset);
+        writeOffset += chunk.length;
+      }
+      return trimmed;
+    });
+    log(`Voiced ${script.turns.length} turns in ${((Date.now() - synthStarted) / 1000).toFixed(0)}s (${SYNTH_CONCURRENCY} in flight)`);
+
     for (let i = 0; i < script.turns.length; i++) {
       const turn = script.turns[i];
       const speakerKey = turn.speaker === "B" ? "B" : "A";
       const voice = DEFAULT_VOICES[speakerKey];
+      const trimmed = renderedTurns[i];
 
       if (turn.segment === "subscribe" && script.turns[i - 1]?.segment !== "subscribe") {
         for (const part of [silence(MIDROLL_BEFORE_S), kit.midroll, silence(MIDROLL_AFTER_S)]) {
@@ -593,46 +710,6 @@ async function main() {
           : TURN_GAP_S);
         pcmParts.push(gap);
         cursorSamples += gap.length;
-      }
-
-      const rawSpeechSource = turn.ttsText || turn.text;
-      const segments = rawSpeechSource
-        .split(/(\[sfx:(?:notes|paper)\])/i)
-        .filter((seg) => seg.trim().length > 0);
-      const turnChunks = [];
-      let noteFlip = false;
-
-      for (let sIdx = 0; sIdx < segments.length; sIdx++) {
-        const seg = segments[sIdx];
-        if (/^\[sfx:(?:notes|paper)\]$/i.test(seg)) {
-          noteFlip = true;
-          continue;
-        }
-        const speechText = normalizeForSpeech(seg);
-        if (!speechText) continue;
-        let segSamples;
-        if (activeProvider === "fish") {
-          const speed = Number.isFinite(turn.speed) ? Math.max(0.9, Math.min(1.12, turn.speed)) : voice.fishSpeed;
-          const mp3Buf = await synthFishWithRetry(speechText, voice.fishId, args["fish-model"], speed);
-          segSamples = await decodeAudioToFloat32(ffmpegPath, tmpDir, `${i}-${sIdx}`, mp3Buf, "mp3");
-        } else {
-          segSamples = await synthKokoro(speechText, voice.kokoroId);
-        }
-        const samples = trimSilence(segSamples);
-        if (noteFlip) {
-          const effect = makeNoteFlipSfx();
-          for (let j = 0; j < Math.min(samples.length, effect.length); j++) samples[j] += effect[j] * 0.45;
-          noteFlip = false;
-        }
-        turnChunks.push(samples);
-      }
-
-      const totalLen = turnChunks.reduce((sum, c) => sum + c.length, 0);
-      const trimmed = new Float32Array(totalLen);
-      let writeOffset = 0;
-      for (const chunk of turnChunks) {
-        trimmed.set(chunk, writeOffset);
-        writeOffset += chunk.length;
       }
 
       const startMs = Math.round((cursorSamples / SAMPLE_RATE) * 1000);
@@ -666,8 +743,18 @@ async function main() {
       mixed.set(part, at);
       at += part.length;
     }
+    // The rest of the intro continues under the opening lines: ducked so the speech stays in
+    // front, ramped down over the duck-in, and faded out over its last seconds.
     const introTail = kit.intro.subarray(introLead);
-    for (let j = 0; j < introTail.length && introLead + j < mixed.length; j++) mixed[introLead + j] += introTail[j];
+    const duckGain = 0.45;
+    const duckRamp = Math.min(Math.round(0.25 * SAMPLE_RATE), introTail.length);
+    const fadeLen = Math.min(Math.round(2.5 * SAMPLE_RATE), introTail.length);
+    for (let j = 0; j < introTail.length && introLead + j < mixed.length; j++) {
+      const ramp = duckRamp > 0 ? Math.min(1, j / duckRamp) : 1;
+      const gain = 1 - (1 - duckGain) * ramp;
+      const fade = fadeLen > 0 ? Math.min(1, (introTail.length - j) / fadeLen) : 1;
+      mixed[introLead + j] += introTail[j] * gain * fade;
+    }
     pcmParts.length = 0;
     pcmParts.push(mixed);
 
@@ -715,7 +802,7 @@ async function main() {
       durationSeconds,
       bytes: mp3Stat.size,
       provider: activeProvider,
-      model: activeProvider === "fish" ? args["fish-model"] : KOKORO_MODEL_ID,
+      model: activeProvider === "fish" ? activeFishModel : KOKORO_MODEL_ID,
       hosts: {
         A: { name: DEFAULT_VOICES.A.name, role: DEFAULT_VOICES.A.role },
         B: { name: DEFAULT_VOICES.B.name, role: DEFAULT_VOICES.B.role },
@@ -797,7 +884,12 @@ async function publishToTwk(slug, outDir, episodesRoot) {
   log(`Published to ${doneJson.episodeUrl} | IndexNow: ${doneJson.indexing?.indexNow?.message || "ok"}`);
 }
 
-main().catch((err) => {
-  console.error("[twk-podcast] FATAL:", err);
-  process.exit(1);
-});
+const isDirectRun = process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
+if (isDirectRun) {
+  main().catch((err) => {
+    console.error("[twk-podcast] FATAL:", err);
+    process.exit(1);
+  });
+}
+
+export { normalizeForSpeech, stripDeliveryTags, trimSilence, encodeWav, makeNoteFlipSfx, withRetry, mapWithConcurrency };

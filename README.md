@@ -23,6 +23,18 @@ node generate.mjs --sample "Nvidia reported revenue of 40 billion dollars." --vo
 
 Other options are `--shard 0/3` (split a backfill across parallel workers), `--max-minutes`, `--dtype` (default `fp32`, faster on CPU than `q8`) and `--dry-run`.
 
+Transient errors (timeouts, 429, 5xx) retry with backoff: story fetches, uploads, Fish TTS calls and podcast chapter drafting all retry instead of killing the run, and an invalid writer chapter is retried too. If the Fish plan rejects the paid model, the podcast renderer drops to `s2.1-pro-free` for the rest of the run.
+
+Podcast renders voice turns with a few requests in flight (assembly still follows script order). Tune with `TWK_SYNTH_CONCURRENCY` (default 3, max 6).
+
+## Tests
+
+```bash
+npm test
+```
+
+Pure helpers (chunking, trimming, WAV encoding, speech normalization, retry and concurrency) are covered by node:test unit tests; they need no model download.
+
 ## Secrets
 
 The workflow needs two repository secrets, `TWK_AUTOMATION_URL` and `AUTOMATION_INGEST_SECRET`. GitHub masks them in logs, and workflows triggered by pull requests from forks don't receive them.

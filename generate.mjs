@@ -54,7 +54,7 @@ function log(...parts) {
   console.log(`[${secs}s]`, ...parts);
 }
 
-async function api(method, body, query = "") {
+async function apiOnce(method, body, query = "") {
   const res = await fetch(`${baseUrl}/api/automation/audio${query}`, {
     method,
     headers: {
@@ -62,6 +62,7 @@ async function api(method, body, query = "") {
       ...(body ? { "Content-Type": "application/json" } : {}),
     },
     body: body ? JSON.stringify(body) : undefined,
+    signal: AbortSignal.timeout(60_000),
   });
   const text = await res.text();
   let json;
@@ -70,8 +71,36 @@ async function api(method, body, query = "") {
   } catch {
     json = { error: text.slice(0, 200) };
   }
-  if (!res.ok) throw new Error(`${method} audio API ${res.status}: ${json.error || "failed"}`);
+  if (!res.ok) {
+    const err = new Error(`${method} audio API ${res.status}: ${json.error || "failed"}`);
+    err.status = res.status;
+    throw err;
+  }
   return json;
+}
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/** Retries transient failures (network errors, timeouts, 429 and 5xx) with backoff. 4xx fails fast. */
+export async function withRetry(fn, { attempts = 3, baseMs = 2000, label = "request", retryIf = null } = {}) {
+  let last;
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    try {
+      return await fn();
+    } catch (error) {
+      last = error;
+      const retryable = (!error.status || error.status === 429 || error.status >= 500) || (retryIf && retryIf(error));
+      if (!retryable || attempt === attempts) throw error;
+      const wait = baseMs * 2 ** (attempt - 1);
+      log(`${label} failed (${error.message}); retrying in ${(wait / 1000).toFixed(0)}s (${attempt}/${attempts - 1})`);
+      await sleep(wait);
+    }
+  }
+  throw last;
+}
+
+function api(method, body, query = "") {
+  return withRetry(() => apiOnce(method, body, query), { label: `${method} audio API` });
 }
 
 /** Paragraphs stay apart (longer pause); long paragraphs split at sentence ends into model-sized chunks. */
@@ -114,7 +143,7 @@ export function chunkSpeech(text) {
 }
 
 /** Kokoro pads every clip with uneven silence; trim it so the gaps we add are the gaps you hear. */
-function trimSilence(samples, threshold = 0.008) {
+export function trimSilence(samples, threshold = 0.008) {
   let start = 0;
   let end = samples.length - 1;
   while (start < end && Math.abs(samples[start]) < threshold) start++;
@@ -127,7 +156,7 @@ function silence(seconds) {
   return new Float32Array(Math.round(SAMPLE_RATE * seconds));
 }
 
-function encodeWav(parts) {
+export function encodeWav(parts) {
   const total = parts.reduce((sum, p) => sum + p.length, 0);
   const buffer = Buffer.alloc(44 + total * 2);
   buffer.write("RIFF", 0);
@@ -215,12 +244,19 @@ async function speak(tts, text) {
 
 async function uploadStory(story, mp3, seconds) {
   const { signedUrl } = await api("POST", { action: "upload-url", postId: story.id, hash: story.hash });
-  const put = await fetch(signedUrl, {
-    method: "PUT",
-    headers: { "Content-Type": "audio/mpeg", "cache-control": "max-age=31536000", "x-upsert": "true" },
-    body: mp3,
-  });
-  if (!put.ok) throw new Error(`Upload failed ${put.status}: ${(await put.text()).slice(0, 200)}`);
+  await withRetry(async () => {
+    const put = await fetch(signedUrl, {
+      method: "PUT",
+      headers: { "Content-Type": "audio/mpeg", "cache-control": "max-age=31536000", "x-upsert": "true" },
+      body: mp3,
+      signal: AbortSignal.timeout(120_000),
+    });
+    if (!put.ok) {
+      const err = new Error(`Upload failed ${put.status}: ${(await put.text()).slice(0, 200)}`);
+      err.status = put.status;
+      throw err;
+    }
+  }, { label: `upload ${story.slug}` });
   await api("POST", {
     action: "complete",
     postId: story.id,
@@ -248,9 +284,12 @@ async function main() {
     return;
   }
 
+  const [shardIndex, shardCount] = args.shard.split("/").map(Number);
+  if (!Number.isInteger(shardIndex) || !Number.isInteger(shardCount) || shardCount < 1 || shardIndex < 0 || shardIndex >= shardCount) {
+    throw new Error(`--shard must look like 0/3 (index/count, index < count); got "${args.shard}"`);
+  }
   if (!baseUrl || !secret) throw new Error("Set TWK_AUTOMATION_URL and AUTOMATION_INGEST_SECRET.");
 
-  const [shardIndex, shardCount] = args.shard.split("/").map(Number);
   const { pending: all, total } = await api("GET", null, `?limit=${Number(args.limit) || 40}&voice=${args.voice}`);
   const pending = all.filter((_, i) => i % (shardCount || 1) === (shardIndex || 0));
   log(`${pending.length} stories to read in this worker (${all.length} waiting, ${total} published)`);
@@ -299,7 +338,10 @@ async function main() {
   if (failed > 0 && done === 0) process.exitCode = 1;
 }
 
-main().catch((error) => {
-  console.error(error);
-  process.exit(1);
-});
+const isDirectRun = process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
+if (isDirectRun) {
+  main().catch((error) => {
+    console.error(error);
+    process.exit(1);
+  });
+}
