@@ -19,6 +19,7 @@ import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import { cacheKey, readCache, writeCache, pruneCache } from "./cache.mjs";
 import { cachedSpeech, speechIdentity } from "./speech-cache.mjs";
+import { publishPodcastFiles } from "./publish.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(here, "..");
@@ -855,7 +856,7 @@ async function main() {
     log(`Done! ${mp3Path} (${(mp3Stat.size / 1024 / 1024).toFixed(2)} MB, ${durationSeconds}s)`);
 
     if (args.publish) {
-      if (mp3Stat.size > 50_000_000) throw new Error("The rendered MP3 exceeds the Supabase upload limit. The local file is ready for larger-object hosting.");
+      if (mp3Stat.size > 50_000_000) throw new Error("The rendered MP3 exceeds the publisher's 50 MB safety limit. The local file is ready; review that limit before uploading larger files.");
       await publishToTwk(script.slug, outDir, episodesRoot);
     }
   } finally {
@@ -872,50 +873,13 @@ async function publishToTwk(slug, outDir, episodesRoot) {
   }
 
   log(`Publishing ${slug} to ${baseUrl}...`);
-  const urlRes = await fetch(`${baseUrl}/api/automation/podcast`, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${secret}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({ action: "upload-url", slug }),
-  });
-  if (!urlRes.ok) {
-    throw new Error(`upload-url failed ${urlRes.status}: ${await urlRes.text()}`);
-  }
-  const { uploads } = await urlRes.json();
-
   const files = [
     ["mp3", path.join(outDir, "episode.mp3"), "audio/mpeg"],
     ["transcript", path.join(outDir, "transcript.json"), "application/json"],
     ["manifest", path.join(outDir, "manifest.json"), "application/json"],
     ["feed", path.join(episodesRoot, "feed.xml"), "application/xml"],
   ];
-
-  for (const [key, filePath, contentType] of files) {
-    const buf = await readFile(filePath);
-    const putRes = await fetch(uploads[key].signedUrl, {
-      method: "PUT",
-      headers: { "Content-Type": contentType },
-      body: buf,
-    });
-    if (!putRes.ok) {
-      throw new Error(`Upload ${key} failed ${putRes.status}: ${await putRes.text()}`);
-    }
-  }
-
-  const doneRes = await fetch(`${baseUrl}/api/automation/podcast`, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${secret}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({ action: "complete", slug }),
-  });
-  if (!doneRes.ok) {
-    throw new Error(`complete failed ${doneRes.status}: ${await doneRes.text()}`);
-  }
-  const doneJson = await doneRes.json();
+  const doneJson = await publishPodcastFiles({ baseUrl, secret, slug, files, log });
   log(`Published to ${doneJson.episodeUrl} | IndexNow: ${doneJson.indexing?.indexNow?.message || "ok"}`);
 }
 

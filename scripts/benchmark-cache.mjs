@@ -11,7 +11,7 @@ const dir = await mkdtemp(path.join(os.tmpdir(), 'twk-e2e-'));
 const { default: ffmpeg } = await import(`${repo}/node_modules/ffmpeg-static/index.js`);
 const tone = execFileSync(ffmpeg, ['-hide_banner','-loglevel','error','-f','lavfi','-i','sine=frequency=440:duration=0.4','-f','mp3','pipe:1']);
 await mkdir(path.join(dir, 'podcast/episodes'), {recursive: true});
-for (const file of ['generate-podcast.mjs', 'cache.mjs', 'speech-cache.mjs']) await cp(path.join(repo,'podcast',file),path.join(dir,'podcast',file));
+for (const file of ['generate-podcast.mjs', 'cache.mjs', 'speech-cache.mjs', 'publish.mjs']) await cp(path.join(repo,'podcast',file),path.join(dir,'podcast',file));
 await cp(path.join(repo,'podcast/kit'),path.join(dir,'podcast/kit'),{recursive:true});
 await symlink(path.join(repo,'node_modules'),path.join(dir,'node_modules'));
 let chapters = 0, speech = 0;

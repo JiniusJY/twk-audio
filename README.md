@@ -27,6 +27,19 @@ Transient errors (timeouts, 429, 5xx) retry with backoff: story fetches, uploads
 
 Podcast renders voice turns with a few requests in flight (assembly still follows script order). Tune with `TWK_SYNTH_CONCURRENCY` (default 3, max 6).
 
+## Podcast publication requests
+
+Final publication uses `podcast/publish.mjs`. API calls have a 30-second deadline;
+each file PUT has a 180-second deadline. Signed-URL requests and identical-byte
+PUTs retry transient failures at most three times, with fresh deadlines. All four
+local files and distinct HTTPS upload targets are checked before the first PUT.
+Bearer tokens, signed URLs and remote error bodies are not included in errors.
+
+Website completion is one attempt, not an automatic retry. A timeout, lost response
+or bad response can follow a committed index update. Check the website episode and
+index before rerunning publication. Local rendered files remain available. The
+existing 50 MB publisher safety limit remains; it is not a claim about R2's limit.
+
 ## Tests
 
 ```bash
