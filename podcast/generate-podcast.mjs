@@ -449,11 +449,16 @@ async function rebuildRssFeed(episodesRoot) {
   <channel>
     <title>${SHOW_NAME}</title>
     <link>https://techwhoknows.com/podcasts</link>
-    <description>In-depth AI-hosted technical briefings on AI infrastructure, startups, cybersecurity, and Asia-Pacific technology from TechWhoKnows.</description>
+    <description>Get the latest tech news, understand why it matters, and learn how to apply it in your work. Who Knows? is the podcast from TechWhoKnows (techwhoknows.com), hosted by Jade Chen and Alok Nair, covering AI infrastructure, cybersecurity, startups, hardware and Asia-Pacific technology. Join 50,000+ readers at techwhoknows.com/weekly-brief. Disclosure: Who Knows? is AI-hosted and produced by TechWhoKnows.</description>
     <language>en-sg</language>
     <itunes:author>TechWhoKnows (TWK)</itunes:author>
+    <itunes:owner>
+      <itunes:name>TechWhoKnows</itunes:name>
+      <itunes:email>jin@techwhoknows.com</itunes:email>
+    </itunes:owner>
     <itunes:category text="Technology" />
     <itunes:explicit>false</itunes:explicit>
+    <itunes:image href="https://techwhoknows.com/images/podcast-cover.png" />
     <atom:link href="https://techwhoknows.com/podcasts/feed.xml" rel="self" type="application/rss+xml" />
 ${itemsXml}
   </channel>
