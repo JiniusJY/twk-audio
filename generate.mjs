@@ -21,6 +21,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
+import { normalizeForSpeech } from "./pronunciation.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 
@@ -229,7 +230,8 @@ async function loadModel() {
 }
 
 async function speak(tts, text) {
-  const paragraphs = chunkSpeech(text);
+  const normalized = normalizeForSpeech(text).replace(/\[[^\]]{1,32}\]\s*/g, "").replace(/\s+/g, " ").trim();
+  const paragraphs = chunkSpeech(normalized);
   const out = [];
   for (let pi = 0; pi < paragraphs.length; pi++) {
     if (pi > 0) out.push(silence(PARAGRAPH_GAP_S));

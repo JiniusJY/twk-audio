@@ -20,6 +20,7 @@ import { parseArgs } from "node:util";
 import { cacheKey, readCache, writeCache, pruneCache } from "./cache.mjs";
 import { cachedSpeech, speechIdentity } from "./speech-cache.mjs";
 import { publishPodcastFiles } from "./publish.mjs";
+import { normalizeForSpeech } from "../pronunciation.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(here, "..");
@@ -248,92 +249,47 @@ function stripDeliveryTags(text) {
   return text.replace(/\[[^\]]{1,32}\]\s*/g, "").replace(/\s+/g, " ").trim();
 }
 
-const PRONUNCIATION_MAP = new Map([
-  ["pypi", "Pie P I"],
-  ["apac", "A-Pac"],
-  ["sqlite", "sequel-lite"],
-  ["sql", "sequel"],
-  ["postgresql", "Post-gres Q L"],
-  ["mysql", "My sequel"],
-  ["kubectl", "kube control"],
-  ["nginx", "engine X"],
-  ["oauth", "oh-auth"],
-  ["wi-fi", "why-fie"],
-  ["wifi", "why-fie"],
-  ["ios", "I O S"],
-  ["macos", "Mac O S"],
-  ["github", "Git Hub"],
-  ["gitlab", "Git Lab"],
-  ["nvme", "N V M e"],
-  ["saas", "sass"],
-  ["paas", "pass"],
-  ["iaas", "I-as"],
-  ["ciso", "see-so"],
-  ["latex", "lay-tech"],
-  ["gui", "gooey"],
-  ["json", "jayson"],
-  ["yaml", "yammel"],
-  ["regex", "redge-ex"],
-  ["devops", "dev-ops"],
-  ["finops", "fin-ops"],
-  ["openai", "Open A I"],
-  ["chatgpt", "Chat G P T"],
-  ["deepseek", "Deep Seek"],
-  ["graphql", "Graph Q L"],
-]);
-
-const SPELLED_ACRONYMS = new Set([
-  "NSA", "PHP", "API", "SDK", "CLI", "SSH", "TLS", "SSL", "DNS", "HTTP", "HTTPS",
-  "URL", "URI", "HTML", "CSS", "XML", "CSV", "PDF", "SQL", "FBI", "CIA", "SEC",
-  "MAS", "IMDA", "CSA", "AI", "ML", "LLM", "RAG", "MCP", "AWS", "GCP", "VPC",
-  "IAM", "MFA", "SSO", "VPN", "CVE", "RCE", "XSS", "CSRF", "CDN", "ISP", "B2B",
-  "B2C", "IPO", "VC", "ARR", "MRR", "ROI", "KPI", "CEO", "CTO", "CFO", "COO",
-  "GPU", "CPU", "TPU", "NPU", "USB", "RAM", "SSD", "HDD", "OS", "VM", "KVM",
-  "TCP", "UDP", "IP", "BGP", "ASN", "SOC", "SIEM", "EDR", "XDR",
-]);
-
-function spaceAcronym(word) {
-  return word.split("").join(" ");
-}
+const REDUNDANT_RESUME_RE = /^(?:(?:\[[^\]]{1,32}\]\s*)*)(?:(?:right|alright|all right|okay|ok|so|now|anyway)[.,!?\s]+)*(?:let['’]?s\s+get\s+)?(?:right\s+)?back\s+to\s+it[.!?,:\s—-]*/i;
 
 /**
- * Normalises technical acronyms, fused ALLCAPS+Word compounds (e.g. NSANet -> N S A Net),
- * versions, and CVEs for natural TTS pronunciation while preserving [Fish tags].
+ * Removes a duplicated "Right. Back to it." / "Back to it." opening on the turn
+ * immediately following the mid-roll subscribe break.
  */
-function normalizeForSpeech(rawText) {
-  const parts = String(rawText || "").split(/(\[[^\]]{1,32}\])/g);
-  return parts
-    .map((part) => {
-      if (/^\[sfx:[^\]]+\]$/i.test(part)) return "";
-      if (part.startsWith("[") && part.endsWith("]")) return part;
-      let out = part;
-      // CVE-2026-1234 -> C V E 2026, 1234
-      out = out.replace(/\bCVE-(\d{4})-(\d+)\b/gi, (_, y, n) => `C V E ${y}, ${n}`);
-      // Version numbers like v2.1 or v2.1.3 -> version 2 point 1
-      out = out.replace(/\bv(\d+(?:\.\d+)+)\b/gi, (_, v) => `version ${v.replace(/\./g, " point ")}`);
-      // Known tricky tech words (case-insensitive whole word)
-      out = out.replace(/\b[A-Za-z][A-Za-z0-9-]*\b/g, (token) => {
-        const mapped = PRONUNCIATION_MAP.get(token.toLowerCase());
-        if (mapped) return mapped;
-        // Fused ALLCAPS + TitleCase word: NSANet -> N S A Net, AWSLambda -> A W S Lambda
-        if (/^[A-Z]{2,}[A-Z][a-z]{2,}$/.test(token)) {
-          const split = token.replace(/^([A-Z]{2,})([A-Z][a-z]{2,})$/, (_, acr, rest) => `${spaceAcronym(acr)} ${rest}`);
-          return split;
-        }
-        // Fused Word + ALLCAPS suffix: FastAPI -> Fast A P I
-        if (/^[A-Z][a-z]{2,}[A-Z]{2,}$/.test(token)) {
-          return token.replace(/^([A-Z][a-z]{2,})([A-Z]{2,})$/, (_, head, acr) => `${head} ${spaceAcronym(acr)}`);
-        }
-        if (SPELLED_ACRONYMS.has(token)) {
-          return spaceAcronym(token);
-        }
-        return token;
-      });
-      return out;
-    })
-    .join("")
-    .replace(/\s{2,}/g, " ")
-    .trim();
+function stripRedundantResumePrefix(turns) {
+  if (!Array.isArray(turns)) return turns;
+  const cleaned = [];
+  let pendingChapter = null;
+
+  for (let i = 0; i < turns.length; i++) {
+    const turn = { ...turns[i] };
+    const afterSubscribe = i > 0 && turns[i - 1]?.segment === "subscribe" && turn.segment !== "subscribe";
+
+    if (pendingChapter && !turn.chapter) {
+      turn.chapter = pendingChapter;
+      pendingChapter = null;
+    }
+
+    if (afterSubscribe && typeof turn.text === "string" && REDUNDANT_RESUME_RE.test(turn.text)) {
+      const nextText = turn.text.replace(REDUNDANT_RESUME_RE, "").trim();
+      const nextTts = typeof turn.ttsText === "string"
+        ? turn.ttsText.replace(REDUNDANT_RESUME_RE, "").trim()
+        : undefined;
+
+      if (!nextText) {
+        if (turn.chapter) pendingChapter = turn.chapter;
+        continue;
+      }
+      turn.text = nextText.charAt(0).toUpperCase() + nextText.slice(1);
+      if (nextTts) {
+        turn.ttsText = nextTts.charAt(0).toUpperCase() + nextTts.slice(1);
+      } else {
+        delete turn.ttsText;
+      }
+    }
+
+    cleaned.push(turn);
+  }
+  return cleaned;
 }
 
 async function synthFish(text, referenceId, speed = 1.05) {
@@ -577,7 +533,10 @@ async function writeEpisode(episodesRoot) {
   for (let scene = progress.completed.length; scene < episode.chapters.length * 2; scene++) {
     const index = Math.floor(scene / 2);
     const part = scene % 2;
-    const previous = (progress.completed.at(-1)?.turns ?? []).slice(-3)
+    const previous = progress.completed
+      .flatMap((chapter) => chapter.turns ?? [])
+      .filter((turn) => turn.segment !== "subscribe")
+      .slice(-3)
       .map((turn) => `${turn.speaker}: ${turn.text}`).join("\n").slice(-1200);
     const chapter = await fetchDraft(baseUrl, secret, "", {
       action: "write-chapter",
@@ -602,7 +561,7 @@ async function writeEpisode(episodesRoot) {
     ...metadata,
     title: `Episode ${metadata.episodeNumber}: ${metadata.title.replace(/^Episode \d+:\s*/i, "")}`,
     sources: savedSources.map(({ evidence, ...source }) => source),
-    turns: progress.completed.flatMap(({ turns }) => turns),
+    turns: stripRedundantResumePrefix(progress.completed.flatMap(({ turns }) => turns)),
     writerModels: [...new Set([progress.outlineModel, ...progress.completed.map(({ model }) => model)])],
   };
   await writeFile(path.join(outDir, "script.json"), JSON.stringify(script, null, 2));
@@ -641,6 +600,8 @@ async function main() {
   if (!script.turns.some((turn) => turn.segment === "subscribe")) {
     throw new Error("The script has no mid-roll subscribe ask (segment: \"subscribe\"). Draft it through the TWK site, which adds the ask, before rendering.");
   }
+
+  script.turns = stripRedundantResumePrefix(script.turns);
 
   const ffmpegPath = await resolveFfmpeg();
   const tmpDir = await mkdir(path.join(os.tmpdir(), `twk-podcast-${Date.now()}`), { recursive: true });
@@ -893,4 +854,4 @@ if (isDirectRun) {
   }));
 }
 
-export { normalizeForSpeech, stripDeliveryTags, trimSilence, encodeWav, makeNoteFlipSfx, withRetry, mapWithConcurrency };
+export { normalizeForSpeech, stripDeliveryTags, stripRedundantResumePrefix, trimSilence, encodeWav, makeNoteFlipSfx, withRetry, mapWithConcurrency };

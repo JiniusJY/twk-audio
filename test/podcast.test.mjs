@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import {
   normalizeForSpeech,
   stripDeliveryTags,
+  stripRedundantResumePrefix,
   trimSilence,
   encodeWav,
   makeNoteFlipSfx,
@@ -27,6 +28,43 @@ test("normalizeForSpeech spells known acronyms and maps tricky words", () => {
 test("normalizeForSpeech keeps Fish delivery tags and drops sfx markers", () => {
   assert.equal(normalizeForSpeech("[chuckles] well then"), "[chuckles] well then");
   assert.equal(normalizeForSpeech("look [sfx:notes] here"), "look here");
+});
+
+test("normalizeForSpeech expands currencies, units, and percentages", () => {
+  assert.equal(normalizeForSpeech("raised $4.5M and S$12M"), "raised 4.5 million dollars and 12 million Singapore dollars");
+  assert.equal(normalizeForSpeech("US$2.4B at 130kW and 200ms"), "2.4 billion U S dollars at 130 kilowatts and 200 milliseconds");
+  assert.equal(normalizeForSpeech("128GB on 3nm at 70%"), "128 gigabytes on 3 nanometre at 70 percent");
+});
+
+test("normalizeForSpeech handles plural/possessive acronyms, hyphenated compounds, and URLs", () => {
+  assert.equal(normalizeForSpeech("APIs and GPUs on GitHub's cloud"), "A P I's and G P U's on Git Hub's cloud");
+  assert.equal(normalizeForSpeech("AI-powered USB-C over IPv6"), "A I-powered U S B-C over I P v 6");
+  assert.equal(normalizeForSpeech("visit techwhoknows.com/podcasts"), "visit Tech Who Knows dot com slash podcasts");
+  assert.equal(normalizeForSpeech("Kubernetes FP8 INT4 in ASEAN"), "Koo-ber-net-eez F P 8 int 4 in ah-see-an");
+  assert.equal(normalizeForSpeech("24/7 R&D — e.g. CI/CD"), "twenty-four seven R and D, for example, C I C D");
+});
+
+test("stripRedundantResumePrefix removes repeated back-to-it after subscribe break", () => {
+  const turns = [
+    { speaker: "A", text: "Right. Back to it.", segment: "subscribe" },
+    { speaker: "B", chapter: "03. Next", text: "Right, back to it. So why did the grid stall?", ttsText: "Right, back to it. So why did the grid stall?" },
+  ];
+  const cleaned = stripRedundantResumePrefix(turns);
+  assert.equal(cleaned[1].text, "So why did the grid stall?");
+  assert.equal(cleaned[1].ttsText, "So why did the grid stall?");
+  assert.equal(cleaned[1].chapter, "03. Next");
+});
+
+test("stripRedundantResumePrefix drops empty resume turn and preserves chapter on next turn", () => {
+  const turns = [
+    { speaker: "A", text: "Right. Back to it.", segment: "subscribe" },
+    { speaker: "B", chapter: "03. Next", text: "Right. Back to it." },
+    { speaker: "A", text: "Back to Fort Meade, the patch failed." },
+  ];
+  const cleaned = stripRedundantResumePrefix(turns);
+  assert.equal(cleaned.length, 2);
+  assert.equal(cleaned[1].chapter, "03. Next");
+  assert.equal(cleaned[1].text, "Back to Fort Meade, the patch failed.");
 });
 
 test("stripDeliveryTags removes bracketed tags", () => {
