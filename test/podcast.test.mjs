@@ -7,6 +7,8 @@ import {
   trimSilence,
   encodeWav,
   makeNoteFlipSfx,
+  parseRetryAfterMs,
+  withRetry,
   mapWithConcurrency,
 } from "../podcast/generate-podcast.mjs";
 
@@ -130,4 +132,50 @@ test("mapWithConcurrency drains active workers and stops new work after failure"
   }), /test failure/);
   assert.equal(finished, true);
   assert.deepEqual(started, [0, 1]);
+});
+
+test("parseRetryAfterMs parses numeric seconds and ignores empty values", () => {
+  assert.equal(parseRetryAfterMs("90"), 90_000);
+  assert.equal(parseRetryAfterMs("1.5"), 1_500);
+  assert.equal(parseRetryAfterMs(""), null);
+  assert.equal(parseRetryAfterMs(null), null);
+});
+
+test("withRetry honours Retry-After header with a 2s buffer and caps at 120s", async () => {
+  const waits = [];
+  let calls = 0;
+  const result = await withRetry(
+    async () => {
+      calls++;
+      if (calls < 3) {
+        const err = new Error("Rate limited");
+        err.status = 429;
+        err.retryAfterMs = calls === 1 ? 45_000 : 150_000;
+        throw err;
+      }
+      return "ok";
+    },
+    { attempts: 4, baseMs: 2000, sleepFn: async (ms) => { waits.push(ms); } },
+  );
+  assert.equal(result, "ok");
+  assert.deepEqual(waits, [47_000, 120_000]);
+});
+
+test("withRetry uses cooldown-aware backoff on 429 or cooling-down messages without Retry-After", async () => {
+  const waits = [];
+  let calls = 0;
+  const result = await withRetry(
+    async () => {
+      calls++;
+      if (calls <= 3) {
+        const err = new Error("No model answered: nim cooling down after rate limiting");
+        err.status = 502;
+        throw err;
+      }
+      return "recovered";
+    },
+    { attempts: 4, baseMs: 4000, sleepFn: async (ms) => { waits.push(ms); } },
+  );
+  assert.equal(result, "recovered");
+  assert.deepEqual(waits, [35_000, 70_000, 95_000]);
 });

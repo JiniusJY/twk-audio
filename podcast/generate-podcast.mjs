@@ -59,8 +59,23 @@ let fishFallbackLogged = false;
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
+function parseRetryAfterMs(header) {
+  if (!header) return null;
+  const trimmed = String(header).trim();
+  if (!trimmed) return null;
+  const seconds = Number(trimmed);
+  if (Number.isFinite(seconds) && seconds >= 0) {
+    return Math.round(seconds * 1000);
+  }
+  const dateMs = Date.parse(trimmed);
+  if (Number.isFinite(dateMs)) {
+    return Math.max(0, dateMs - Date.now());
+  }
+  return null;
+}
+
 /** Retries transient failures (network errors, timeouts, 429 and 5xx) with backoff. 4xx fails fast. */
-async function withRetry(fn, { attempts = 3, baseMs = 2000, label = "request", retryIf = null } = {}) {
+async function withRetry(fn, { attempts = 3, baseMs = 2000, label = "request", retryIf = null, sleepFn = sleep } = {}) {
   let last;
   for (let attempt = 1; attempt <= attempts; attempt++) {
     try {
@@ -69,9 +84,14 @@ async function withRetry(fn, { attempts = 3, baseMs = 2000, label = "request", r
       last = error;
       const retryable = (!error.status || error.status === 429 || error.status >= 500) || (retryIf && retryIf(error));
       if (!retryable || attempt === attempts) throw error;
-      const wait = baseMs * 2 ** (attempt - 1);
+      let wait = baseMs * 2 ** (attempt - 1);
+      if (typeof error.retryAfterMs === "number" && Number.isFinite(error.retryAfterMs) && error.retryAfterMs > 0) {
+        wait = Math.min(120_000, error.retryAfterMs + 2_000);
+      } else if (error.status === 429 || /rate limit|cooling down/i.test(String(error.message))) {
+        wait = Math.min(95_000, Math.max(wait, 35_000 * attempt));
+      }
       log(`${label} failed (${String(error.message).slice(0, 200)}); retrying in ${(wait / 1000).toFixed(0)}s (${attempt}/${attempts - 1})`);
-      await sleep(wait);
+      await sleepFn(wait);
     }
   }
   throw last;
@@ -322,6 +342,7 @@ async function synthFish(text, referenceId, speed = 1.05) {
       const body = await res.text().catch(() => "");
       const err = new Error(`Fish Audio ${res.status}: ${body.slice(0, 200)}`);
       err.status = res.status;
+      err.retryAfterMs = parseRetryAfterMs(res.headers.get("retry-after"));
       err.fallbackable = res.status === 401 || res.status === 402 || res.status === 403 || res.status === 429;
       throw err;
     }
@@ -357,6 +378,7 @@ async function synthFish(text, referenceId, speed = 1.05) {
     const body = await res.text().catch(() => "");
     const err = new Error(`TWK TTS proxy ${res.status}: ${body.slice(0, 200)}`);
     err.status = res.status;
+    err.retryAfterMs = parseRetryAfterMs(res.headers.get("retry-after"));
     err.fallbackable = [401, 402, 403, 429, 503].includes(res.status);
     throw err;
   }
@@ -481,6 +503,7 @@ async function fetchDraftOnce(baseUrl, secret, slugPath, body) {
   if (!res.ok || !result) {
     const err = new Error(result?.error || `Podcast writer returned ${res.status}`);
     err.status = res.status;
+    err.retryAfterMs = parseRetryAfterMs(res.headers.get("retry-after"));
     throw err;
   }
   return result;
@@ -509,7 +532,7 @@ async function writeEpisode(episodesRoot) {
   if (args.story) params.set("story", args.story);
   if (args.writer) params.set("writer", args.writer);
   for (const source of args.source ?? []) params.append("source", source);
-  const data = await fetchDraft(baseUrl, secret, `?${params}`);
+  const data = await fetchDraft(baseUrl, secret, `?${params}`, undefined, { attempts: 4 });
   if (!data.pending) {
     log(`No episode queued (${data.reason || "none"}).`);
     return null;
@@ -859,4 +882,4 @@ if (isDirectRun) {
   }));
 }
 
-export { normalizeForSpeech, stripDeliveryTags, stripRedundantResumePrefix, trimSilence, encodeWav, makeNoteFlipSfx, withRetry, mapWithConcurrency };
+export { normalizeForSpeech, stripDeliveryTags, stripRedundantResumePrefix, trimSilence, encodeWav, makeNoteFlipSfx, parseRetryAfterMs, withRetry, mapWithConcurrency };
