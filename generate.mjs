@@ -30,7 +30,7 @@ const { values: args } = parseArgs({
     limit: { type: "string", default: "40" },
     "max-minutes": { type: "string", default: "0" },
     voice: { type: "string", default: process.env.TWK_AUDIO_VOICE || "bf_emma" },
-    dtype: { type: "string", default: "fp32" },
+    dtype: { type: "string", default: "q8" },
     speed: { type: "string", default: "1" },
     out: { type: "string" },
     sample: { type: "string" },
@@ -199,24 +199,24 @@ async function toMp3(wav, ffmpeg) {
   const dir = path.join(os.tmpdir(), "twk-audio");
   await mkdir(dir, { recursive: true });
   const id = `${process.pid}-${Math.random().toString(36).slice(2)}`;
-  const inFile = path.join(dir, `${id}.wav`);
   const outFile = path.join(dir, `${id}.mp3`);
-  await writeFile(inFile, wav);
   await new Promise((resolve, reject) => {
     // Mono speech: 48 kbps at 24 kHz is clear on phone speakers and ~0.36 MB a minute.
     const proc = spawn(
       ffmpeg,
-      ["-hide_banner", "-loglevel", "error", "-y", "-i", inFile, "-af", "loudnorm=I=-16:TP=-1.5:LRA=11",
-        "-ar", String(SAMPLE_RATE), "-ac", "1", "-codec:a", "libmp3lame", "-b:a", "48k", outFile],
-      { stdio: ["ignore", "ignore", "pipe"] },
+      ["-hide_banner", "-loglevel", "error", "-y", "-f", "wav", "-i", "pipe:0", "-af", "loudnorm=I=-16:TP=-1.5:LRA=11",
+        "-ar", String(SAMPLE_RATE), "-ac", "1", "-codec:a", "libmp3lame", "-b:a", "48k", "-compression_level", "2", outFile],
+      { stdio: ["pipe", "ignore", "pipe"] },
     );
     let err = "";
     proc.stderr.on("data", (d) => (err += d));
     proc.on("error", reject);
     proc.on("close", (code) => (code === 0 ? resolve() : reject(new Error(`ffmpeg exited ${code}: ${err}`))));
+    proc.stdin.on("error", () => {});
+    proc.stdin.end(wav);
   });
   const mp3 = await readFile(outFile);
-  await Promise.all([rm(inFile, { force: true }), rm(outFile, { force: true })]);
+  await rm(outFile, { force: true });
   return mp3;
 }
 

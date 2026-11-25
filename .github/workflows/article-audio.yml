@@ -56,7 +56,16 @@ jobs:
             -H "Authorization: Bearer $AUTOMATION_INGEST_SECRET" \
             "$TWK_AUTOMATION_URL/api/automation/audio?limit=0&voice=bf_emma${days_query}" | jq -r '.remaining')
           echo "Stories waiting for audio: $remaining"
-          workers=$(( WORKERS < 1 ? 1 : (WORKERS > 12 ? 12 : WORKERS) ))
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" && -n "$WORKERS" ]]; then
+            workers="$WORKERS"
+          elif (( remaining >= 7 )); then
+            workers=4
+          elif (( remaining >= 3 )); then
+            workers=2
+          else
+            workers=1
+          fi
+          workers=$(( workers < 1 ? 1 : (workers > 12 ? 12 : workers) ))
           echo "remaining=$remaining" >> "$GITHUB_OUTPUT"
           echo "shards=$(jq -cn --argjson n "$workers" '[range(0; $n)] | map({index: ., count: $n})')" >> "$GITHUB_OUTPUT"
           echo "days=$days_flag" >> "$GITHUB_OUTPUT"
@@ -102,7 +111,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: .cache/models
-          key: kokoro-82m-v1.0-onnx-fp32
+          key: kokoro-82m-v1.0-onnx-q8
 
       - name: Read stories aloud
         run: |

@@ -45,6 +45,7 @@ const { values: args } = parseArgs({
     publish: { type: "boolean", default: Boolean(process.env.TWK_AUTOMATION_URL && process.env.AUTOMATION_INGEST_SECRET) },
     out: { type: "string" },
     "dry-run": { type: "boolean", default: false },
+    fresh: { type: "boolean", default: false },
   },
 });
 
@@ -56,7 +57,7 @@ const KOKORO_MODEL_ID = "onnx-community/Kokoro-82M-v1.0-ONNX";
 const FREE_FISH_MODEL = "s2.1-pro-free";
 // Synthesis requests run this many at a time. Fish latency dominates a render, so overlapping
 // turns cuts wall-clock time roughly by this factor while assembly stays in script order.
-const SYNTH_CONCURRENCY = Math.max(1, Math.min(6, Number(process.env.TWK_SYNTH_CONCURRENCY || 3)));
+const SYNTH_CONCURRENCY = Math.max(1, Math.min(8, Number(process.env.TWK_SYNTH_CONCURRENCY || 5)));
 // The active Fish model can drop to the free tier mid-run if the plan rejects the paid one.
 let activeFishModel = args["fish-model"];
 let fishFallbackLogged = false;
@@ -79,14 +80,15 @@ function parseRetryAfterMs(header) {
 }
 
 /** Retries transient failures (network errors, timeouts, 429 and 5xx) with backoff. 4xx fails fast. */
-async function withRetry(fn, { attempts = 3, baseMs = 2000, label = "request", retryIf = null, sleepFn = sleep } = {}) {
+async function withRetry(fn, { attempts = 3, baseMs = 2000, label = "request", retryIf = null, shouldRetry = null, sleepFn = sleep } = {}) {
+  const checkRetry = retryIf || shouldRetry;
   let last;
   for (let attempt = 1; attempt <= attempts; attempt++) {
     try {
       return await fn();
     } catch (error) {
       last = error;
-      const retryable = (!error.status || error.status === 429 || error.status >= 500) || (retryIf && retryIf(error));
+      const retryable = (!error.status || error.status === 429 || error.status >= 500) || (checkRetry && checkRetry(error));
       if (!retryable || attempt === attempts) throw error;
       let wait = baseMs * 2 ** (attempt - 1);
       if (typeof error.retryAfterMs === "number" && Number.isFinite(error.retryAfterMs) && error.retryAfterMs > 0) {
@@ -166,39 +168,55 @@ async function resolveFfmpeg() {
   return mod.default;
 }
 
-function runFfmpeg(ffmpegPath, ffmpegArgs) {
+function runFfmpeg(ffmpegPath, ffmpegArgs, { inputBuffer = null, captureStdout = false } = {}) {
   return new Promise((resolve, reject) => {
-    const proc = spawn(ffmpegPath, ffmpegArgs, { stdio: ["ignore", "pipe", "pipe"] });
+    const proc = spawn(ffmpegPath, ffmpegArgs, {
+      stdio: [inputBuffer ? "pipe" : "ignore", captureStdout ? "pipe" : "ignore", "pipe"],
+    });
+    const stdoutChunks = [];
     let stderr = "";
+    if (captureStdout) {
+      proc.stdout.on("data", (chunk) => stdoutChunks.push(chunk));
+    }
     proc.stderr.on("data", (chunk) => {
       stderr += chunk.toString();
     });
+    proc.on("error", reject);
     proc.on("close", (code) => {
-      if (code === 0) resolve();
+      if (code === 0) resolve(captureStdout ? Buffer.concat(stdoutChunks) : undefined);
       else reject(new Error(`ffmpeg exited ${code}: ${stderr.slice(-400)}`));
     });
+    if (inputBuffer) {
+      proc.stdin.on("error", () => {});
+      proc.stdin.end(inputBuffer);
+    }
   });
 }
 
-/** Decode any audio buffer (e.g., Fish MP3) to mono 24kHz Float32Array via ffmpeg. */
-async function decodeAudioToFloat32(ffmpegPath, tmpDir, index, audioBuffer, ext = "mp3") {
-  const inFile = path.join(tmpDir, `turn-${index}.${ext}`);
-  const outFile = path.join(tmpDir, `turn-${index}.f32`);
-  await writeFile(inFile, audioBuffer);
-  await runFfmpeg(ffmpegPath, [
-    "-y",
-    "-i",
-    inFile,
-    "-ac",
-    "1",
-    "-ar",
-    String(SAMPLE_RATE),
-    "-f",
-    "f32le",
-    outFile,
-  ]);
-  const raw = await readFile(outFile);
-  return new Float32Array(raw.buffer, raw.byteOffset, raw.byteLength / 4);
+/** Decode any audio buffer (e.g., Fish MP3) to mono 24kHz Float32Array via ffmpeg pipes (zero temp files). */
+async function decodeAudioToFloat32(ffmpegPath, _tmpDir, _index, audioBuffer, ext = "mp3") {
+  const raw = await runFfmpeg(
+    ffmpegPath,
+    [
+      "-hide_banner",
+      "-loglevel",
+      "error",
+      "-f",
+      ext,
+      "-i",
+      "pipe:0",
+      "-ac",
+      "1",
+      "-ar",
+      String(SAMPLE_RATE),
+      "-f",
+      "f32le",
+      "pipe:1",
+    ],
+    { inputBuffer: audioBuffer, captureStdout: true },
+  );
+  const aligned = raw.byteOffset % 4 === 0 ? raw : Buffer.from(raw);
+  return new Float32Array(aligned.buffer, aligned.byteOffset, Math.floor(aligned.byteLength / 4));
 }
 
 function trimSilence(samples, threshold = 0.008) {
@@ -576,7 +594,33 @@ async function writeEpisode(episodesRoot) {
   if (args.writer) params.set("writer", args.writer);
   for (const source of args.source ?? []) params.append("source", source);
   const exported = await fetchDraft(baseUrl, secret, `?${params}`, undefined, { attempts: 4 });
-  const data = direct && exported.pending ? await directPlan(exported.snapshot, Number(args.minutes)) : exported;
+  let data = exported;
+  if (direct && exported.pending) {
+    const planKey = cacheKey({
+      schema: EDITORIAL_VERSION,
+      minutes: Number(args.minutes),
+      writer: args.writer || null,
+      slug: exported.snapshot.slug,
+      episodeNumber: exported.snapshot.episodeNumber,
+      hosts: exported.snapshot.hosts,
+      sources: exported.snapshot.sources,
+      subscribeTurns: exported.snapshot.subscribeTurns,
+    });
+    const cachedPlan = args.fresh
+      ? null
+      : await readCache(CACHE_DIR, "plans", planKey)
+          .then((raw) => (raw ? JSON.parse(raw.toString("utf8")) : null))
+          .catch(() => null);
+    if (cachedPlan?.plan?.chapters?.length >= 2 && cachedPlan?.plan?.sources?.length) {
+      data = cachedPlan;
+      log(`Reused cached outline (${cachedPlan.model}).`);
+    } else {
+      data = await directPlan(exported.snapshot, Number(args.minutes));
+      await writeCache(CACHE_DIR, "plans", planKey, JSON.stringify(data)).catch((error) => {
+        log(`Plan cache write skipped: ${error.code || error.message}`);
+      });
+    }
+  }
   if (!data.pending) {
     log(`No episode queued (${data.reason || "none"}).`);
     return null;
@@ -647,13 +691,39 @@ async function writeEpisode(episodesRoot) {
     action: "review-script", sources: episode.sources, hosts: script.hosts,
     turns: script.turns, writerModels: script.writerModels,
   };
-  const audit = direct
-    ? await withRetry(() => directReview(reviewRequest), {
-        label: "Evidence review",
-        attempts: 3,
-        shouldRetry: (err) => /TimeoutError|aborted due to timeout|Invalid model JSON|expected \d+ audited turns|missing or duplicate turn indices/i.test(String(err?.message || err)),
-      })
-    : await fetchDraft(baseUrl, secret, "", reviewRequest, { attempts: 1 });
+  const reviewKey = cacheKey({
+    schema: EDITORIAL_VERSION,
+    scriptHash: scriptIdentity(script),
+    sourceHash: cacheKey(script.sources),
+  });
+  const cachedReview = !direct || args.fresh
+    ? null
+    : await readCache(CACHE_DIR, "reviews", reviewKey)
+        .then((raw) => (raw ? JSON.parse(raw.toString("utf8")) : null))
+        .catch(() => null);
+  let audit;
+  if (
+    cachedReview?.ok === true
+    && cachedReview.reviewedTurns === script.turns.length
+    && cachedReview.reviewerModel
+    && !script.writerModels.includes(cachedReview.reviewerModel)
+  ) {
+    audit = cachedReview;
+    log(`Reused cached editorial review (${audit.reviewerModel}).`);
+  } else {
+    audit = direct
+      ? await withRetry(() => directReview(reviewRequest), {
+          label: "Evidence review",
+          attempts: 3,
+          shouldRetry: (err) => /TimeoutError|aborted due to timeout|Invalid model JSON|expected \d+ audited turns|missing or duplicate turn indices/i.test(String(err?.message || err)),
+        })
+      : await fetchDraft(baseUrl, secret, "", reviewRequest, { attempts: 1 });
+    if (direct && audit?.ok === true) {
+      await writeCache(CACHE_DIR, "reviews", reviewKey, JSON.stringify(audit)).catch((error) => {
+        log(`Review cache write skipped: ${error.code || error.message}`);
+      });
+    }
+  }
   if (audit.ok !== true || audit.reviewedTurns !== script.turns.length || !audit.reviewerModel || script.writerModels.includes(audit.reviewerModel)) throw new Error("Independent evidence review incomplete; no audio generated");
   await writeFile(path.join(outDir, "editorial-review.json"), JSON.stringify({
     schema: EDITORIAL_VERSION, scriptHash: scriptIdentity(script), sourceHash: cacheKey(script.sources),
@@ -709,224 +779,235 @@ async function main() {
   }
 
   const ffmpegPath = await resolveFfmpeg();
-  const tmpDir = await mkdir(path.join(os.tmpdir(), `twk-podcast-${Date.now()}`), { recursive: true });
   const pcmParts = [];
   const transcriptTurns = [];
   const chapters = [];
   let cursorSamples = 0;
   let lastChapter = null;
 
-  try {
-    const kit = {};
-    for (const name of ["intro", "midroll", "outro"]) {
-      kit[name] = await decodeAudioToFloat32(ffmpegPath, tmpDir, `kit-${name}`, await readFile(path.join(KIT_DIR, `${name}.mp3`)), "mp3");
-    }
-    // The intro's first INTRO_LEAD_S play alone; the rest is mixed under the opening lines below.
-    const introLead = Math.min(kit.intro.length, Math.round(INTRO_LEAD_S * SAMPLE_RATE));
-    pcmParts.push(kit.intro.slice(0, introLead));
-    cursorSamples += introLead;
+  const kitEntries = await Promise.all(
+    ["intro", "midroll", "outro"].map(async (name) => [
+      name,
+      await decodeAudioToFloat32(ffmpegPath, null, `kit-${name}`, await readFile(path.join(KIT_DIR, `${name}.mp3`)), "mp3"),
+    ]),
+  );
+  const kit = Object.fromEntries(kitEntries);
+  // The intro's first INTRO_LEAD_S play alone; the rest is mixed under the opening lines below.
+  const introLead = Math.min(kit.intro.length, Math.round(INTRO_LEAD_S * SAMPLE_RATE));
+  pcmParts.push(kit.intro.slice(0, introLead));
+  cursorSamples += introLead;
 
-    // Synthesis dominates render time, so all turns are voiced first with a few requests in
-    // flight, then assembled in script order. Assembly (gaps, kit, timestamps) is unchanged.
-    const synthStarted = Date.now();
-    let speechHits = 0;
-    let speechMisses = 0;
-    const renderedTurns = await mapWithConcurrency(script.turns, SYNTH_CONCURRENCY, async (turn, i) => {
-      const speakerKey = turn.speaker;
-      const voice = DEFAULT_VOICES[speakerKey];
-      const rawSpeechSource = turn.ttsText || turn.text;
-      const segments = rawSpeechSource
-        .split(/(\[sfx:(?:notes|paper)\])/i)
-        .filter((seg) => seg.trim().length > 0);
-      const turnChunks = [];
-      let noteFlip = false;
+  // Synthesis dominates render time, so all turns are voiced first with a few requests in
+  // flight, then assembled in script order. Assembly (gaps, kit, timestamps) is unchanged.
+  const synthStarted = Date.now();
+  let speechHits = 0;
+  let speechMisses = 0;
+  const renderedTurns = await mapWithConcurrency(script.turns, SYNTH_CONCURRENCY, async (turn, i) => {
+    const speakerKey = turn.speaker;
+    const voice = DEFAULT_VOICES[speakerKey];
+    const rawSpeechSource = turn.ttsText || turn.text;
+    const segments = rawSpeechSource
+      .split(/(\[sfx:(?:notes|paper)\])/i)
+      .filter((seg) => seg.trim().length > 0);
+    const turnChunks = [];
+    let noteFlip = false;
 
-      for (let sIdx = 0; sIdx < segments.length; sIdx++) {
-        const seg = segments[sIdx];
-        if (/^\[sfx:(?:notes|paper)\]$/i.test(seg)) {
-          noteFlip = true;
-          continue;
-        }
-        const speechText = normalizeForSpeech(seg);
-        if (!speechText) continue;
-        let segSamples;
-        if (activeProvider === "fish") {
-          const speed = Number.isFinite(turn.speed) ? Math.max(0.9, Math.min(1.12, turn.speed)) : voice.fishSpeed;
-          const { samples, hit } = await cachedSpeech({
-            root: CACHE_DIR,
-            identity: speechIdentity({ text: speechText, voice: voice.fishId, speed, model: activeFishModel, route: process.env.FISH_AUDIO_API_KEY ? "direct" : "proxy" }),
-            synthesize: () => synthFishWithRetry(speechText, voice.fishId, speed),
-            decode: (audio) => decodeAudioToFloat32(ffmpegPath, tmpDir, `${i}-${sIdx}`, audio, "mp3"),
-            warn: log,
-          });
-          if (hit) speechHits++; else speechMisses++;
-          segSamples = samples;
-        } else {
-          segSamples = await synthKokoro(speechText, voice.kokoroId);
-        }
-        const samples = trimSilence(segSamples);
-        if (noteFlip) {
-          const effect = makeNoteFlipSfx();
-          for (let j = 0; j < Math.min(samples.length, effect.length); j++) samples[j] += effect[j] * 0.45;
-          noteFlip = false;
-        }
-        turnChunks.push(samples);
+    for (let sIdx = 0; sIdx < segments.length; sIdx++) {
+      const seg = segments[sIdx];
+      if (/^\[sfx:(?:notes|paper)\]$/i.test(seg)) {
+        noteFlip = true;
+        continue;
       }
-
-      const totalLen = turnChunks.reduce((sum, c) => sum + c.length, 0);
-      const trimmed = new Float32Array(totalLen);
-      let writeOffset = 0;
-      for (const chunk of turnChunks) {
-        trimmed.set(chunk, writeOffset);
-        writeOffset += chunk.length;
-      }
-      return trimmed;
-    });
-    log(`Voiced ${script.turns.length} turns in ${((Date.now() - synthStarted) / 1000).toFixed(0)}s (${SYNTH_CONCURRENCY} in flight; speech cache ${speechHits} hits, ${speechMisses} misses)`);
-
-    for (let i = 0; i < script.turns.length; i++) {
-      const turn = script.turns[i];
-      const speakerKey = turn.speaker;
-      const voice = DEFAULT_VOICES[speakerKey];
-      const trimmed = renderedTurns[i];
-
-      if (turn.segment === "subscribe" && script.turns[i - 1]?.segment !== "subscribe") {
-        for (const part of [silence(MIDROLL_BEFORE_S), kit.midroll, silence(MIDROLL_AFTER_S)]) {
-          pcmParts.push(part);
-          cursorSamples += part.length;
-        }
-      } else if (turn.chapter && turn.chapter !== lastChapter) {
-        if (i > 0) {
-          const gap = silence(CHAPTER_GAP_S);
-          pcmParts.push(gap);
-          cursorSamples += gap.length;
-        }
-        chapters.push({
-          title: turn.chapter,
-          startMs: Math.round((cursorSamples / SAMPLE_RATE) * 1000),
+      const speechText = normalizeForSpeech(seg);
+      if (!speechText) continue;
+      let segSamples;
+      if (activeProvider === "fish") {
+        const speed = Number.isFinite(turn.speed) ? Math.max(0.9, Math.min(1.12, turn.speed)) : voice.fishSpeed;
+        const { samples, hit } = await cachedSpeech({
+          root: CACHE_DIR,
+          identity: speechIdentity({ text: speechText, voice: voice.fishId, speed, model: activeFishModel, route: process.env.FISH_AUDIO_API_KEY ? "direct" : "proxy" }),
+          synthesize: () => synthFishWithRetry(speechText, voice.fishId, speed),
+          decode: (audio) => decodeAudioToFloat32(ffmpegPath, null, `${i}-${sIdx}`, audio, "mp3"),
+          warn: log,
         });
-        lastChapter = turn.chapter;
-      } else if (i > 0) {
-        const gap = silence(Number.isFinite(turn.pauseBeforeMs)
-          ? Math.max(0, Math.min(1500, turn.pauseBeforeMs)) / 1000
-          : TURN_GAP_S);
+        if (hit) speechHits++; else speechMisses++;
+        segSamples = samples;
+      } else {
+        segSamples = await synthKokoro(speechText, voice.kokoroId);
+      }
+      const samples = trimSilence(segSamples);
+      if (noteFlip) {
+        const effect = makeNoteFlipSfx();
+        for (let j = 0; j < Math.min(samples.length, effect.length); j++) samples[j] += effect[j] * 0.45;
+        noteFlip = false;
+      }
+      turnChunks.push(samples);
+    }
+
+    const totalLen = turnChunks.reduce((sum, c) => sum + c.length, 0);
+    const trimmed = new Float32Array(totalLen);
+    let writeOffset = 0;
+    for (const chunk of turnChunks) {
+      trimmed.set(chunk, writeOffset);
+      writeOffset += chunk.length;
+    }
+    return trimmed;
+  });
+  log(`Voiced ${script.turns.length} turns in ${((Date.now() - synthStarted) / 1000).toFixed(0)}s (${SYNTH_CONCURRENCY} in flight; speech cache ${speechHits} hits, ${speechMisses} misses)`);
+
+  for (let i = 0; i < script.turns.length; i++) {
+    const turn = script.turns[i];
+    const speakerKey = turn.speaker;
+    const voice = DEFAULT_VOICES[speakerKey];
+    const trimmed = renderedTurns[i];
+
+    if (turn.segment === "subscribe" && script.turns[i - 1]?.segment !== "subscribe") {
+      for (const part of [silence(MIDROLL_BEFORE_S), kit.midroll, silence(MIDROLL_AFTER_S)]) {
+        pcmParts.push(part);
+        cursorSamples += part.length;
+      }
+    } else if (turn.chapter && turn.chapter !== lastChapter) {
+      if (i > 0) {
+        const gap = silence(CHAPTER_GAP_S);
         pcmParts.push(gap);
         cursorSamples += gap.length;
       }
-
-      const startMs = Math.round((cursorSamples / SAMPLE_RATE) * 1000);
-      cursorSamples += trimmed.length;
-      const endMs = Math.round((cursorSamples / SAMPLE_RATE) * 1000);
-      pcmParts.push(trimmed);
-
-      transcriptTurns.push({
-        id: i + 1,
-        speaker: voice.name,
-        speakerRole: voice.role,
-        speakerKey,
-        chapter: turn.chapter || lastChapter,
-        startMs,
-        endMs,
-        text: stripDeliveryTags(turn.text),
-        citations: turn.citations || [],
-        ...(turn.segment === "subscribe" ? { segment: "subscribe" } : {}),
+      chapters.push({
+        title: turn.chapter,
+        startMs: Math.round((cursorSamples / SAMPLE_RATE) * 1000),
       });
-
-      log(`  Turn ${i + 1}/${script.turns.length} (${voice.name}): ${((endMs - startMs) / 1000).toFixed(1)}s`);
+      lastChapter = turn.chapter;
+    } else if (i > 0) {
+      const gap = silence(Number.isFinite(turn.pauseBeforeMs)
+        ? Math.max(0, Math.min(1500, turn.pauseBeforeMs)) / 1000
+        : TURN_GAP_S);
+      pcmParts.push(gap);
+      cursorSamples += gap.length;
     }
 
-    for (const part of [silence(OUTRO_GAP_S), kit.outro]) {
-      pcmParts.push(part);
-      cursorSamples += part.length;
-    }
-    const mixed = new Float32Array(cursorSamples);
-    let at = 0;
-    for (const part of pcmParts) {
-      mixed.set(part, at);
-      at += part.length;
-    }
-    // The rest of the intro continues under the opening lines: ducked so the speech stays in
-    // front, ramped down over the duck-in, and faded out over its last seconds.
-    const introTail = kit.intro.subarray(introLead);
-    const duckGain = 0.45;
-    const duckRamp = Math.min(Math.round(0.25 * SAMPLE_RATE), introTail.length);
-    const fadeLen = Math.min(Math.round(2.5 * SAMPLE_RATE), introTail.length);
-    for (let j = 0; j < introTail.length && introLead + j < mixed.length; j++) {
-      const ramp = duckRamp > 0 ? Math.min(1, j / duckRamp) : 1;
-      const gain = 1 - (1 - duckGain) * ramp;
-      const fade = fadeLen > 0 ? Math.min(1, (introTail.length - j) / fadeLen) : 1;
-      mixed[introLead + j] += introTail[j] * gain * fade;
-    }
-    pcmParts.length = 0;
-    pcmParts.push(mixed);
+    const startMs = Math.round((cursorSamples / SAMPLE_RATE) * 1000);
+    cursorSamples += trimmed.length;
+    const endMs = Math.round((cursorSamples / SAMPLE_RATE) * 1000);
+    pcmParts.push(trimmed);
 
-    await mkdir(outDir, { recursive: true });
-    const wavPath = path.join(tmpDir, "episode.wav");
-    const mp3Path = path.join(outDir, "episode.mp3");
-    const seconds = cursorSamples / SAMPLE_RATE;
-    const bitrate = [128, 112, 96, 80, 64, 56, 48].find((rate) => (rate * 1000 * seconds) / 8 < 46_000_000) ?? 48;
-    await writeFile(wavPath, encodeWav(pcmParts));
+    transcriptTurns.push({
+      id: i + 1,
+      speaker: voice.name,
+      speakerRole: voice.role,
+      speakerKey,
+      chapter: turn.chapter || lastChapter,
+      startMs,
+      endMs,
+      text: stripDeliveryTags(turn.text),
+      citations: turn.citations || [],
+      ...(turn.segment === "subscribe" ? { segment: "subscribe" } : {}),
+    });
 
-    await runFfmpeg(ffmpegPath, [
+    log(`  Turn ${i + 1}/${script.turns.length} (${voice.name}): ${((endMs - startMs) / 1000).toFixed(1)}s`);
+  }
+
+  for (const part of [silence(OUTRO_GAP_S), kit.outro]) {
+    pcmParts.push(part);
+    cursorSamples += part.length;
+  }
+  const mixed = new Float32Array(cursorSamples);
+  let at = 0;
+  for (const part of pcmParts) {
+    mixed.set(part, at);
+    at += part.length;
+  }
+  // The rest of the intro continues under the opening lines: ducked so the speech stays in
+  // front, ramped down over the duck-in, and faded out over its last seconds.
+  const introTail = kit.intro.subarray(introLead);
+  const duckGain = 0.45;
+  const duckRamp = Math.min(Math.round(0.25 * SAMPLE_RATE), introTail.length);
+  const fadeLen = Math.min(Math.round(2.5 * SAMPLE_RATE), introTail.length);
+  for (let j = 0; j < introTail.length && introLead + j < mixed.length; j++) {
+    const ramp = duckRamp > 0 ? Math.min(1, j / duckRamp) : 1;
+    const gain = 1 - (1 - duckGain) * ramp;
+    const fade = fadeLen > 0 ? Math.min(1, (introTail.length - j) / fadeLen) : 1;
+    mixed[introLead + j] += introTail[j] * gain * fade;
+  }
+  pcmParts.length = 0;
+
+  await mkdir(outDir, { recursive: true });
+  const mp3Path = path.join(outDir, "episode.mp3");
+  const seconds = cursorSamples / SAMPLE_RATE;
+  const bitrate = [128, 112, 96, 80, 64, 56, 48].find((rate) => (rate * 1000 * seconds) / 8 < 46_000_000) ?? 48;
+  const pcmBuffer = Buffer.from(mixed.buffer, mixed.byteOffset, mixed.byteLength);
+
+  await runFfmpeg(
+    ffmpegPath,
+    [
+      "-hide_banner",
+      "-loglevel",
+      "error",
       "-y",
+      "-f",
+      "f32le",
+      "-ar",
+      String(SAMPLE_RATE),
+      "-ac",
+      "1",
       "-i",
-      wavPath,
+      "pipe:0",
       "-af",
       "loudnorm=I=-16:TP=-1.5:LRA=11",
       "-codec:a",
       "libmp3lame",
       "-ar",
-      "24000",
+      String(SAMPLE_RATE),
       "-b:a",
       `${bitrate}k`,
+      "-compression_level",
+      "2",
       mp3Path,
-    ]);
+    ],
+    { inputBuffer: pcmBuffer },
+  );
 
-    const mp3Stat = await stat(mp3Path);
-    const durationSeconds = Number((cursorSamples / SAMPLE_RATE).toFixed(2));
+  const mp3Stat = await stat(mp3Path);
+  const durationSeconds = Number((cursorSamples / SAMPLE_RATE).toFixed(2));
 
-    const transcriptDoc = {
-      slug: script.slug,
-      title: script.title,
-      episodeNumber: script.episodeNumber,
-      durationSeconds,
-      chapters,
-      sources: script.sources || [],
-      turns: transcriptTurns,
-    };
+  const transcriptDoc = {
+    slug: script.slug,
+    title: script.title,
+    episodeNumber: script.episodeNumber,
+    durationSeconds,
+    chapters,
+    sources: script.sources || [],
+    turns: transcriptTurns,
+  };
 
-    const manifestDoc = {
-      slug: script.slug,
-      episodeNumber: script.episodeNumber,
-      title: script.title,
-      description: script.description,
-      publishedAt: script.publishedAt || new Date().toISOString(),
-      durationSeconds,
-      bytes: mp3Stat.size,
-      provider: activeProvider,
-      model: activeProvider === "fish" ? activeFishModel : KOKORO_MODEL_ID,
-      hosts: {
-        A: { name: DEFAULT_VOICES.A.name, role: DEFAULT_VOICES.A.role },
-        B: { name: DEFAULT_VOICES.B.name, role: DEFAULT_VOICES.B.role },
-      },
-      chapters,
-      sources: script.sources || [],
-      aiDisclosure: `${SHOW_NAME} is AI-hosted and produced by TechWhoKnows.`,
-      audioKit: "who-knows-v1",
-    };
+  const manifestDoc = {
+    slug: script.slug,
+    episodeNumber: script.episodeNumber,
+    title: script.title,
+    description: script.description,
+    publishedAt: script.publishedAt || new Date().toISOString(),
+    durationSeconds,
+    bytes: mp3Stat.size,
+    provider: activeProvider,
+    model: activeProvider === "fish" ? activeFishModel : KOKORO_MODEL_ID,
+    hosts: {
+      A: { name: DEFAULT_VOICES.A.name, role: DEFAULT_VOICES.A.role },
+      B: { name: DEFAULT_VOICES.B.name, role: DEFAULT_VOICES.B.role },
+    },
+    chapters,
+    sources: script.sources || [],
+    aiDisclosure: `${SHOW_NAME} is AI-hosted and produced by TechWhoKnows.`,
+    audioKit: "who-knows-v1",
+  };
 
-    await writeFile(path.join(outDir, "transcript.json"), JSON.stringify(transcriptDoc, null, 2), "utf8");
-    await writeFile(path.join(outDir, "manifest.json"), JSON.stringify(manifestDoc, null, 2), "utf8");
-    await rebuildRssFeed(episodesRoot);
+  await writeFile(path.join(outDir, "transcript.json"), JSON.stringify(transcriptDoc, null, 2), "utf8");
+  await writeFile(path.join(outDir, "manifest.json"), JSON.stringify(manifestDoc, null, 2), "utf8");
+  await rebuildRssFeed(episodesRoot);
 
-    log(`Done! ${mp3Path} (${(mp3Stat.size / 1024 / 1024).toFixed(2)} MB, ${durationSeconds}s)`);
+  log(`Done! ${mp3Path} (${(mp3Stat.size / 1024 / 1024).toFixed(2)} MB, ${durationSeconds}s)`);
 
-    if (args.publish) {
-      if (mp3Stat.size > 50_000_000) throw new Error("The rendered MP3 exceeds the publisher's 50 MB safety limit. The local file is ready; review that limit before uploading larger files.");
-      await publishToTwk(script.slug, outDir, episodesRoot);
-    }
-  } finally {
-    await rm(tmpDir, { recursive: true, force: true });
+  if (args.publish) {
+    if (mp3Stat.size > 50_000_000) throw new Error("The rendered MP3 exceeds the publisher's 50 MB safety limit. The local file is ready; review that limit before uploading larger files.");
+    await publishToTwk(script.slug, outDir, episodesRoot);
   }
 }
 
@@ -959,4 +1040,4 @@ if (isDirectRun) {
   }));
 }
 
-export { normalizeForSpeech, stripDeliveryTags, stripRedundantResumePrefix, trimSilence, encodeWav, makeNoteFlipSfx, parseRetryAfterMs, withRetry, mapWithConcurrency };
+export { normalizeForSpeech, stripDeliveryTags, stripRedundantResumePrefix, trimSilence, encodeWav, makeNoteFlipSfx, parseRetryAfterMs, withRetry, mapWithConcurrency, decodeAudioToFloat32, resolveFfmpeg };
