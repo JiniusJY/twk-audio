@@ -114,6 +114,7 @@ jobs:
           path: |
             podcast/episodes/*/script.json
             podcast/episodes/*/draft-progress.json
+            podcast/episodes/*/editorial-review.json
             podcast/episodes/*/episode.mp3
             podcast/episodes/*/transcript.json
             podcast/episodes/*/manifest.json

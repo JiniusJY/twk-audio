@@ -41,7 +41,7 @@ test("text, voice, speed, model and synthesis settings invalidate cache", () => 
   const identity = speechIdentity(config);
   const key = cacheKey(identity);
   for (const [field, value] of Object.entries({ text: "New text", voice: "other", speed: 0.95,
-    model: "paid", temperature: 0.8, topP: 0.9, bitrate: 96, schema: 2, sampleRate: 48000 })) {
+    model: "paid", temperature: 0.8, topP: 0.9, bitrate: 96, schema: 3, sampleRate: 48000 })) {
     assert.notEqual(cacheKey({ ...identity, [field]: value }), key, field);
   }
 });
@@ -93,3 +93,10 @@ test("pruning bounds cache bytes without affecting output directories", () => te
   assert.ok(await pruneCache(root, 20) <= 20);
   assert.ok((await readdir(path.join(root, "speech"))).length <= 2);
 }));
+
+
+test("direct and proxy speech parameters cannot share cached audio",()=>{
+ const base={text:"Hello",voice:"voice",speed:1,model:"fish"};
+ const direct=speechIdentity({...base,route:"direct"}),proxy=speechIdentity({...base,route:"proxy"});
+ assert.notDeepEqual(direct,proxy);assert.equal(proxy.bitrate,64);assert.equal(proxy.temperature,0.68);assert.equal(direct.bitrate,128);
+});

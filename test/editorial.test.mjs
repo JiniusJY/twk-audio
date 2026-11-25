@@ -1,0 +1,10 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { scriptProblems, continuityContext } from '../podcast/editorial.mjs';
+const hosts={A:{name:'Jade Chen'},B:{name:'Alok Nair'}};
+test('invalid speakers cannot silently become host A',()=>assert.ok(scriptProblems({hosts,turns:[{speaker:'guest',text:'Hello'}]}).length));
+test('host cannot address their own name',()=>assert.ok(scriptProblems({hosts,turns:[{speaker:'A',text:'Jade, what do you think?'}]}).length));
+test('cross-scene duplicate is blocked',()=>{const text='The calendar and mail stay available through the existing open protocols on compatible clients.';assert.ok(scriptProblems({hosts,turns:[{speaker:'A',text},{speaker:'B',text}]}).length)});
+test('all previous turns survive continuity handoff',()=>assert.equal(continuityContext(Array.from({length:20},(_,i)=>({speaker:'A',text:`line${i}`}))).split('\n').length,20));
+test('stock prose is rejected',()=>assert.ok(scriptProblems({hosts,turns:[{speaker:'A',text:'That distinction matters.'}]}).length));
+test('plain dialogue passes',()=>assert.deepEqual(scriptProblems({hosts,turns:[{speaker:'A',text:'Would you move your inbox?'},{speaker:'B',text:'I would try a spare address first.'}]}),[]));

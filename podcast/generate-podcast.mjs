@@ -20,6 +20,7 @@ import { parseArgs } from "node:util";
 import { cacheKey, readCache, writeCache, pruneCache } from "./cache.mjs";
 import { cachedSpeech, speechIdentity } from "./speech-cache.mjs";
 import { publishPodcastFiles } from "./publish.mjs";
+import { EDITORIAL_VERSION, assertScriptQuality, continuityContext, scriptIdentity } from "./editorial.mjs";
 import { normalizeForSpeech } from "../pronunciation.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -546,7 +547,7 @@ async function writeEpisode(episodesRoot) {
   // Always fetch the current plan first. A new source, outline, duration, writer,
   // or episode metadata invalidates reuse instead of resurrecting a stale draft.
   const requestKey = `scenes:${params}`;
-  const draftKey = cacheKey({ schema: 1, requestKey, plan: episode });
+  const draftKey = cacheKey({ schema: EDITORIAL_VERSION, requestKey, plan: { ...episode, sources: episode.sources.map(s => ({ ...s, upstream: s.upstream?.map(({ retrievedAt, ...e }) => e) })) } });
   const localDraft = await readFile(checkpoint, "utf8").then(JSON.parse).catch(() => null);
   const previousDraft = await readCache(CACHE_DIR, "drafts", draftKey)
     .then((raw) => raw ? JSON.parse(raw.toString("utf8")) : null).catch(() => null);
@@ -561,11 +562,8 @@ async function writeEpisode(episodesRoot) {
   for (let scene = progress.completed.length; scene < episode.chapters.length * 2; scene++) {
     const index = Math.floor(scene / 2);
     const part = scene % 2;
-    const previous = progress.completed
-      .flatMap((chapter) => chapter.turns ?? [])
-      .filter((turn) => turn.segment !== "subscribe")
-      .slice(-3)
-      .map((turn) => `${turn.speaker}: ${turn.text}`).join("\n").slice(-1200);
+    const previous = continuityContext(progress.completed.flatMap(chapter => chapter.turns ?? []));
+    if (previous.length > 160000) throw new Error("Episode continuity context too large; shorten the outline, do not discard earlier dialogue");
     const chapter = await fetchDraft(baseUrl, secret, "", {
       action: "write-chapter",
       plan: episode,
@@ -574,6 +572,7 @@ async function writeEpisode(episodesRoot) {
       previous,
       writer: args.writer,
     }, { attempts: 4, retryWriterErrors: true });
+    assertScriptQuality({ ...episode, turns: [...progress.completed.flatMap(c => c.turns), ...chapter.turns] });
     progress.completed.push(chapter);
     const pendingCheckpoint = `${checkpoint}.tmp`;
     await writeFile(pendingCheckpoint, JSON.stringify(progress, null, 2));
@@ -588,10 +587,19 @@ async function writeEpisode(episodesRoot) {
   const script = {
     ...metadata,
     title: `Episode ${metadata.episodeNumber}: ${metadata.title.replace(/^Episode \d+:\s*/i, "")}`,
-    sources: savedSources.map(({ evidence, ...source }) => source),
+    sources: savedSources.map(({ evidence, upstream, ...source }) => source),
     turns: stripRedundantResumePrefix(progress.completed.flatMap(({ turns }) => turns)),
     writerModels: [...new Set([progress.outlineModel, ...progress.completed.map(({ model }) => model)])],
   };
+  const audit = await fetchDraft(baseUrl, secret, "", {
+    action: "review-script", sources: episode.sources, hosts: script.hosts,
+    turns: script.turns, writerModels: script.writerModels,
+  }, { attempts: 1 });
+  if (audit.ok !== true || audit.reviewedTurns !== script.turns.length || !audit.reviewerModel || script.writerModels.includes(audit.reviewerModel)) throw new Error("Independent evidence review incomplete; no audio generated");
+  await writeFile(path.join(outDir, "editorial-review.json"), JSON.stringify({
+    schema: EDITORIAL_VERSION, scriptHash: scriptIdentity(script), sourceHash: cacheKey(script.sources),
+    reviewerModel: audit.reviewerModel, reviewedAt: new Date().toISOString(), evidence: episode.sources, review: audit.review,
+  }, null, 2));
   await writeFile(path.join(outDir, "script.json"), JSON.stringify(script, null, 2));
   await rm(checkpoint, { force: true });
   return script;
@@ -620,16 +628,22 @@ async function main() {
   const activeProvider = args.provider;
   log(`Episode: ${script.title} (${script.turns.length} turns) | Provider: ${activeProvider}`);
 
+  script.turns = stripRedundantResumePrefix(script.turns);
+  assertScriptQuality(script);
+
   if (args["dry-run"] || args["draft-only"]) {
     log("Draft complete.");
     return;
   }
 
+  const review = await readFile(path.join(episodeDir, "editorial-review.json"), "utf8").then(JSON.parse).catch(() => null);
+  if (review?.schema !== EDITORIAL_VERSION || review.scriptHash !== scriptIdentity(script) || review.sourceHash !== cacheKey(script.sources)) {
+    throw new Error("Current script has no matching editorial evidence review; no TTS or publish allowed");
+  }
+
   if (!script.turns.some((turn) => turn.segment === "subscribe")) {
     throw new Error("The script has no mid-roll subscribe ask (segment: \"subscribe\"). Draft it through the TWK site, which adds the ask, before rendering.");
   }
-
-  script.turns = stripRedundantResumePrefix(script.turns);
 
   const ffmpegPath = await resolveFfmpeg();
   const tmpDir = await mkdir(path.join(os.tmpdir(), `twk-podcast-${Date.now()}`), { recursive: true });
@@ -655,7 +669,7 @@ async function main() {
     let speechHits = 0;
     let speechMisses = 0;
     const renderedTurns = await mapWithConcurrency(script.turns, SYNTH_CONCURRENCY, async (turn, i) => {
-      const speakerKey = turn.speaker === "B" ? "B" : "A";
+      const speakerKey = turn.speaker;
       const voice = DEFAULT_VOICES[speakerKey];
       const rawSpeechSource = turn.ttsText || turn.text;
       const segments = rawSpeechSource
@@ -677,7 +691,7 @@ async function main() {
           const speed = Number.isFinite(turn.speed) ? Math.max(0.9, Math.min(1.12, turn.speed)) : voice.fishSpeed;
           const { samples, hit } = await cachedSpeech({
             root: CACHE_DIR,
-            identity: speechIdentity({ text: speechText, voice: voice.fishId, speed, model: activeFishModel }),
+            identity: speechIdentity({ text: speechText, voice: voice.fishId, speed, model: activeFishModel, route: process.env.FISH_AUDIO_API_KEY ? "direct" : "proxy" }),
             synthesize: () => synthFishWithRetry(speechText, voice.fishId, speed),
             decode: (audio) => decodeAudioToFloat32(ffmpegPath, tmpDir, `${i}-${sIdx}`, audio, "mp3"),
             warn: log,
@@ -709,7 +723,7 @@ async function main() {
 
     for (let i = 0; i < script.turns.length; i++) {
       const turn = script.turns[i];
-      const speakerKey = turn.speaker === "B" ? "B" : "A";
+      const speakerKey = turn.speaker;
       const voice = DEFAULT_VOICES[speakerKey];
       const trimmed = renderedTurns[i];
 

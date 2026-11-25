@@ -1,8 +1,8 @@
 import { cacheKey, readCache, writeCache, removeCache } from "./cache.mjs";
 
-export function speechIdentity({ text, voice, speed, model }) {
-  return { schema: 1, provider: "fish", model, text, voice, speed,
-    format: "mp3", bitrate: 128, temperature: 0.84, topP: 0.86,
+export function speechIdentity({ text, voice, speed, model, route = "direct" }) {
+  return { schema: 2, provider: "fish", route, model, text, voice, speed,
+    format: "mp3", bitrate: route === "proxy" ? 64 : 128, temperature: route === "proxy" ? 0.68 : 0.84, topP: route === "proxy" ? 0.78 : 0.86,
     volume: 0, normalizeLoudness: true, sampleRate: 24000 };
 }
 
