@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { setTimeout as sleep } from "node:timers/promises";
 
@@ -48,8 +49,13 @@ export async function publishPodcastFiles({
     }
   }
 
+  // Content-addressed audio avoids stale same-URL media after a correction.
+  const mp3Entry = files.find(([key]) => key === "mp3");
+  if (!mp3Entry) throw new Error("Prepared MP3 missing");
+  const audioBytes = await readFileImpl(mp3Entry[1]);
+  const audioVersion = createHash("sha256").update(audioBytes).digest("hex");
   const result = await request("upload-url", endpoint, {
-    method: "POST", headers, body: JSON.stringify({ action: "upload-url", slug }),
+    method: "POST", headers, body: JSON.stringify({ action: "upload-url", slug, audioVersion }),
   }, { timeoutMs: apiTimeoutMs, json: true, retry: true });
   const uploads = result?.uploads;
   if (result?.ok !== true || !uploads || UPLOAD_KEYS.some((key) => !isHttpsUrl(uploads[key]?.signedUrl))) {
@@ -64,7 +70,7 @@ export async function publishPodcastFiles({
 
   // Check all local artifacts before overwriting any remote object.
   const loaded = [];
-  for (const [key, filePath, contentType] of files) loaded.push([key, await readFileImpl(filePath), contentType]);
+  for (const [key, filePath, contentType] of files) loaded.push([key, key === "mp3" ? audioBytes : await readFileImpl(filePath), contentType]);
   for (const [key, bytes, contentType] of loaded) {
     await request(`Upload ${key}`, uploads[key].signedUrl, {
       method: "PUT", headers: { "Content-Type": contentType }, body: bytes,
@@ -75,7 +81,7 @@ export async function publishPodcastFiles({
   // write; repeating the POST is not assumed safe under concurrent episode publication.
   try {
     const done = await request("Website completion", endpoint, {
-      method: "POST", headers, body: JSON.stringify({ action: "complete", slug }),
+      method: "POST", headers, body: JSON.stringify({ action: "complete", slug, audioVersion }),
     }, { timeoutMs: apiTimeoutMs, json: true });
     if (done?.ok !== true || !isHttpsUrl(done.episodeUrl)) {
       throw new Error("Completion response could not confirm publication");

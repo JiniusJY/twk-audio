@@ -88,3 +88,10 @@ test("upload errors do not disclose signed URLs, bearer tokens or remote bodies"
   });
   assert.equal(f.attempts.mp3, 3); assert.equal(f.attempts.complete, undefined);
 });
+
+
+test("publication uses the same content-derived version for upload and completion", async()=>{
+ const f=fixture();await f.run();
+ const a=JSON.parse(f.calls[0].init.body),b=JSON.parse(f.calls.at(-1).init.body);
+ assert.match(a.audioVersion,/^[a-f0-9]{64}$/);assert.equal(a.audioVersion,b.audioVersion);
+});
