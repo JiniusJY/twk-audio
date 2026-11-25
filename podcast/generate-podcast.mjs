@@ -51,6 +51,7 @@ const { values: args } = parseArgs({
 
 
 const SAMPLE_RATE = 24000;
+const PLAN_SCHEMA = 2;
 const TURN_GAP_S = 0.18;
 const CHAPTER_GAP_S = 0.55;
 const KOKORO_MODEL_ID = "onnx-community/Kokoro-82M-v1.0-ONNX";
@@ -598,6 +599,7 @@ async function writeEpisode(episodesRoot) {
   if (direct && exported.pending) {
     const planKey = cacheKey({
       schema: EDITORIAL_VERSION,
+      planSchema: PLAN_SCHEMA,
       minutes: Number(args.minutes),
       writer: args.writer || null,
       slug: exported.snapshot.slug,
@@ -634,7 +636,7 @@ async function writeEpisode(episodesRoot) {
   // Always fetch the current plan first. A new source, outline, duration, writer,
   // or episode metadata invalidates reuse instead of resurrecting a stale draft.
   const requestKey = `scenes:${params}`;
-  const draftKey = cacheKey({ schema: EDITORIAL_VERSION, requestKey, plan: { ...episode, sources: episode.sources.map(s => ({ ...s, upstream: s.upstream?.map(({ retrievedAt, ...e }) => e) })) } });
+  const draftKey = cacheKey({ schema: EDITORIAL_VERSION, planSchema: PLAN_SCHEMA, requestKey, plan: { ...episode, sources: episode.sources.map(s => ({ ...s, upstream: s.upstream?.map(({ retrievedAt, ...e }) => e) })) } });
   const localDraft = await readFile(checkpoint, "utf8").then(JSON.parse).catch(() => null);
   const previousDraft = await readCache(CACHE_DIR, "drafts", draftKey)
     .then((raw) => raw ? JSON.parse(raw.toString("utf8")) : null).catch(() => null);
@@ -687,6 +689,19 @@ async function writeEpisode(episodesRoot) {
     turns: stripRedundantResumePrefix(progress.completed.flatMap(({ turns }) => turns)),
     writerModels: [...new Set([progress.outlineModel, ...progress.completed.map(({ model }) => model)])],
   };
+  const cachedRepaired = args.fresh
+    ? null
+    : await readCache(CACHE_DIR, "repaired", draftKey)
+        .then((raw) => (raw ? JSON.parse(raw.toString("utf8")) : null))
+        .catch(() => null);
+  if (cachedRepaired?.turns?.length === script.turns.length) {
+    script.turns = cachedRepaired.turns;
+    if (Array.isArray(cachedRepaired.writerModels)) {
+      script.writerModels = [...new Set([...script.writerModels, ...cachedRepaired.writerModels])];
+    }
+    log("Reused cached repaired turns.");
+  }
+
   let audit;
   for (let repairRound = 0; repairRound <= 2; repairRound++) {
     const reviewRequest = {
@@ -744,6 +759,9 @@ async function writeEpisode(episodesRoot) {
       if (repaired.model && !script.writerModels.includes(repaired.model)) {
         script.writerModels = [...script.writerModels, repaired.model];
       }
+      await writeCache(CACHE_DIR, "repaired", draftKey, JSON.stringify({ turns: script.turns, writerModels: script.writerModels })).catch((error) => {
+        log(`Repaired script cache write skipped: ${error.code || error.message}`);
+      });
     }
   }
   if (audit.ok !== true || audit.reviewedTurns !== script.turns.length || !audit.reviewerModel || script.writerModels.includes(audit.reviewerModel)) throw new Error("Independent evidence review incomplete; no audio generated");

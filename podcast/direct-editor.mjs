@@ -97,7 +97,7 @@ async function runSliceReview({ indexedTurns, reviewSources, hosts, writerModels
       SYSTEM,
       {
         role: 'user',
-        content: `Independently audit turns ${firstIdx} to ${lastIdx} (${indexedTurns.length} turns) against upstream evidence. TWK summaries are not proof. Reject repeated ideas, confused speaker/addressee, AI stock prose, unsupported claims, source contradictions, and unearned certainty. Allowed sourceIds: ${JSON.stringify(reviewSources.map((s) => s.id))} (never use any other ID). Every central factual claim needs a single continuous verbatim phrase (25-120 chars, no ellipses "...") copied directly from source.upstream[].text with the exact matching sourceId and upstream url. Aggregator links or irrelevant excerpts are insufficient. No unsupported claim may pass. Include EVERY index ${JSON.stringify(indices)} in "turns". For segment:"subscribe" turns, use supported:true, sourceIds:[], reason:"Fixed show subscribe break". Return {issues:[],centralClaims:[{claim,sourceId,url,quote,kind:"primary" or "original-reporting",verified:true}],turns:[{index:${firstIdx},supported:true,sourceIds:[],reason:"specific support or why clearly non-factual"}]}.${feedbackNote}\n${JSON.stringify(payload)}`,
+        content: `Independently audit turns ${firstIdx} to ${lastIdx} (${indexedTurns.length} turns) against upstream evidence. TWK summaries are not proof. Reject repeated ideas, confused speaker/addressee, AI stock prose, unsupported claims, source contradictions, and unearned certainty. Conversational questions, reactions, transitions and recaps of already-cited points are supported:true with sourceIds:[]. Flag supported:false only for genuinely unsupported or inaccurate factual claims. Allowed sourceIds: ${JSON.stringify(reviewSources.map((s) => s.id))} (never use any other ID). Every central factual claim needs a single continuous verbatim phrase (25-120 chars, no ellipses "...") copied directly from source.upstream[].text with the exact matching sourceId and upstream url. Aggregator links or irrelevant excerpts are insufficient. No unsupported claim may pass. Include EVERY index ${JSON.stringify(indices)} in "turns". For segment:"subscribe" turns, use supported:true, sourceIds:[], reason:"Fixed show subscribe break". Return {issues:[],centralClaims:[{claim,sourceId,url,quote,kind:"primary" or "original-reporting",verified:true}],turns:[{index:${firstIdx},supported:true,sourceIds:[],reason:"specific support or why clearly non-factual"}]}.${feedbackNote}\n${JSON.stringify(payload)}`,
       },
     ],
     { exclude: writerModels, temperature: retryFeedback ? 0.35 : 0.2 },
@@ -130,6 +130,7 @@ export async function directReview(input, { config = modelConfig(), call = direc
   }
 
   const sliceResults = new Array(slices.length);
+  const sliceErrors = [];
   let next = 0;
   async function worker() {
     while (next < slices.length) {
@@ -152,7 +153,11 @@ export async function directReview(input, { config = modelConfig(), call = direc
           break;
         } catch (err) {
           lastErr = err;
-          if (err?.auditFailure) throw err;
+          if (err?.auditFailure) {
+            sliceErrors.push(err);
+            lastErr = null;
+            break;
+          }
           const msg = err?.message || String(err);
           if (!/Invalid model JSON|Incomplete or unsupported|Unverified or fabricated|Central claim|Cited source|TimeoutError/i.test(msg) || attempt === 3) {
             throw err;
@@ -165,6 +170,20 @@ export async function directReview(input, { config = modelConfig(), call = direc
   }
 
   await Promise.all(Array.from({ length: Math.min(concurrency, slices.length) }, () => worker()));
+
+  if (sliceErrors.length) {
+    const mergedIssues = [...new Set(sliceErrors.flatMap((e) => e.auditFailure?.issues || []))];
+    const turnMap = new Map();
+    for (const e of sliceErrors) {
+      for (const u of e.auditFailure?.unsupportedTurns || []) {
+        if (!turnMap.has(u.index)) turnMap.set(u.index, u);
+      }
+    }
+    const unsupportedTurns = [...turnMap.values()].sort((a, b) => a.index - b.index);
+    const combined = new Error(sliceErrors[0].message);
+    combined.auditFailure = { issues: mergedIssues, unsupportedTurns };
+    throw combined;
+  }
 
   const claimMap = new Map();
   const allTurns = [];
@@ -248,7 +267,7 @@ export async function directChapter(input, { config = modelConfig(), call = dire
 export async function directRepairTurns({ script, sources, flaggedTurns = [], issues = [] }, { config = modelConfig(), call = directJson } = {}) {
   const editableFlagged = flaggedTurns
     .filter((f) => Number.isInteger(f?.index) && f.index >= 0 && f.index < script.turns.length && script.turns[f.index]?.segment !== 'subscribe')
-    .slice(0, 12);
+    .slice(0, 24);
   if (!editableFlagged.length) {
     throw new Error('No editable flagged turns available for repair');
   }
