@@ -19,6 +19,7 @@ import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import { cacheKey, readCache, writeCache, pruneCache } from "./cache.mjs";
 import { cachedSpeech, speechIdentity } from "./speech-cache.mjs";
+import { assertFreeFish } from "./fish-cost-guard.mjs";
 import { publishPodcastFiles } from "./publish.mjs";
 import { EDITORIAL_VERSION, assertScriptQuality, continuityContext, scriptIdentity } from "./editorial.mjs";
 import { normalizeForSpeech } from "../pronunciation.mjs";
@@ -315,6 +316,7 @@ function stripRedundantResumePrefix(turns) {
 
 async function synthFish(text, referenceId, speed = 1.05) {
   const requestedModel = activeFishModel;
+  assertFreeFish(requestedModel);
   const apiKey = process.env.FISH_AUDIO_API_KEY;
   if (apiKey) {
     const res = await fetch("https://api.fish.audio/v1/tts", {

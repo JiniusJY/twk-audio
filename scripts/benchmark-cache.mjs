@@ -12,7 +12,7 @@ const { default: ffmpeg } = await import(`${repo}/node_modules/ffmpeg-static/ind
 const tone = execFileSync(ffmpeg, ['-hide_banner','-loglevel','error','-f','lavfi','-i','sine=frequency=440:duration=0.4','-f','mp3','pipe:1']);
 await mkdir(path.join(dir, 'podcast/episodes'), {recursive: true});
 await cp(path.join(repo, 'pronunciation.mjs'), path.join(dir, 'pronunciation.mjs'));
-for (const file of ['generate-podcast.mjs', 'cache.mjs', 'speech-cache.mjs', 'publish.mjs']) await cp(path.join(repo,'podcast',file),path.join(dir,'podcast',file));
+for (const file of ['generate-podcast.mjs', 'cache.mjs', 'speech-cache.mjs', 'publish.mjs', 'editorial.mjs', 'fish-cost-guard.mjs']) await cp(path.join(repo,'podcast',file),path.join(dir,'podcast',file));
 await cp(path.join(repo,'podcast/kit'),path.join(dir,'podcast/kit'),{recursive:true});
 await symlink(path.join(repo,'node_modules'),path.join(dir,'node_modules'));
 let chapters = 0, speech = 0;
@@ -23,7 +23,7 @@ const server = createServer(async (req,res) => {
   res.setHeader('Content-Type', 'application/json');
   if (req.method === 'GET') return res.end(JSON.stringify({pending: true, model: 'stub-writer', plan: {
     slug: 'cache-check',title:'Cache check',episodeNumber:1,description:'Local mock check',
-    publishedAt:'2026-11-21T00:00:00Z',targetMinutes:1,chapters:[{title:'Test'}], sources:[]
+    hosts:{A:{name:'Jade'},B:{name:'Alok'}},publishedAt:'2026-11-21T00:00:00Z',targetMinutes:1,chapters:[{title:'Test'}], sources:[]
   }}));
   if (input.action === 'write-chapter') {
     chapters++;
@@ -33,6 +33,7 @@ const server = createServer(async (req,res) => {
       chapter:'Test',...(input.part ? {segment:'subscribe'} : {})
     }]}));
   }
+  if(input.action === 'review-script') return res.end(JSON.stringify({ok:true,reviewerModel:'stub-reviewer',reviewedTurns:input.turns.length,review:{issues:[]}}));
   if(input.action === 'tts') {
     speech++;
     await new Promise(r=>setTimeout(r,200));
