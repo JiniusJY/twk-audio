@@ -19,6 +19,7 @@ import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import { cacheKey, readCache, writeCache, pruneCache } from "./cache.mjs";
 import { cachedSpeech, speechIdentity } from "./speech-cache.mjs";
+import { directPlan, directChapter, directReview } from "./direct-editor.mjs";
 import { assertFreeFish } from "./fish-cost-guard.mjs";
 import { publishPodcastFiles } from "./publish.mjs";
 import { EDITORIAL_VERSION, assertScriptQuality, continuityContext, scriptIdentity } from "./editorial.mjs";
@@ -531,11 +532,14 @@ async function writeEpisode(episodesRoot) {
   if (!baseUrl || !secret) {
     throw new Error("--auto requires TWK_AUTOMATION_URL and AUTOMATION_INGEST_SECRET");
   }
-  const params = new URLSearchParams({ format: "plan", minutes: args.minutes });
+  const direct = process.env.PODCAST_EXECUTION === "github";
+  if (direct && !process.env.FISH_AUDIO_API_KEY) throw new Error("GitHub-first mode requires direct Fish credential; Vercel relay disabled");
+  const params = new URLSearchParams({ format: direct ? "source-export" : "plan", minutes: args.minutes });
   if (args.story) params.set("story", args.story);
   if (args.writer) params.set("writer", args.writer);
   for (const source of args.source ?? []) params.append("source", source);
-  const data = await fetchDraft(baseUrl, secret, `?${params}`, undefined, { attempts: 4 });
+  const exported = await fetchDraft(baseUrl, secret, `?${params}`, undefined, { attempts: 4 });
+  const data = direct && exported.pending ? await directPlan(exported.snapshot, Number(args.minutes)) : exported;
   if (!data.pending) {
     log(`No episode queued (${data.reason || "none"}).`);
     return null;
@@ -566,14 +570,15 @@ async function writeEpisode(episodesRoot) {
     const part = scene % 2;
     const previous = continuityContext(progress.completed.flatMap(chapter => chapter.turns ?? []));
     if (previous.length > 160000) throw new Error("Episode continuity context too large; shorten the outline, do not discard earlier dialogue");
-    const chapter = await fetchDraft(baseUrl, secret, "", {
+    const chapterRequest = {
       action: "write-chapter",
       plan: episode,
       index,
       part,
       previous,
       writer: args.writer,
-    }, { attempts: 4, retryWriterErrors: true });
+    };
+    const chapter = direct ? await directChapter(chapterRequest) : await fetchDraft(baseUrl, secret, "", chapterRequest, { attempts: 4, retryWriterErrors: true });
     assertScriptQuality({ ...episode, turns: [...progress.completed.flatMap(c => c.turns), ...chapter.turns] });
     progress.completed.push(chapter);
     const pendingCheckpoint = `${checkpoint}.tmp`;
@@ -585,7 +590,7 @@ async function writeEpisode(episodesRoot) {
     log(`Chapter ${index + 1}/${episode.chapters.length}, scene ${part + 1}/2: ${chapter.words} words (${chapter.model})`);
   }
 
-  const { chapters: _chapters, sources: savedSources, ...metadata } = episode;
+  const { chapters: _chapters, subscribeTurns: _subscribeTurns, sources: savedSources, ...metadata } = episode;
   const script = {
     ...metadata,
     title: `Episode ${metadata.episodeNumber}: ${metadata.title.replace(/^Episode \d+:\s*/i, "")}`,
@@ -593,10 +598,11 @@ async function writeEpisode(episodesRoot) {
     turns: stripRedundantResumePrefix(progress.completed.flatMap(({ turns }) => turns)),
     writerModels: [...new Set([progress.outlineModel, ...progress.completed.map(({ model }) => model)])],
   };
-  const audit = await fetchDraft(baseUrl, secret, "", {
+  const reviewRequest = {
     action: "review-script", sources: episode.sources, hosts: script.hosts,
     turns: script.turns, writerModels: script.writerModels,
-  }, { attempts: 1 });
+  };
+  const audit = direct ? await directReview(reviewRequest) : await fetchDraft(baseUrl, secret, "", reviewRequest, { attempts: 1 });
   if (audit.ok !== true || audit.reviewedTurns !== script.turns.length || !audit.reviewerModel || script.writerModels.includes(audit.reviewerModel)) throw new Error("Independent evidence review incomplete; no audio generated");
   await writeFile(path.join(outDir, "editorial-review.json"), JSON.stringify({
     schema: EDITORIAL_VERSION, scriptHash: scriptIdentity(script), sourceHash: cacheKey(script.sources),
