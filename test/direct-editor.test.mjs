@@ -19,7 +19,7 @@ test('direct model transient errors try eligible same-provider model, auth error
  assert.equal(r.model,'reviewer');assert.equal(calls,2);
  let tCalls=0;const tRes=await directJson(config,[],{fetchImpl:async()=>{if(++tCalls===1){const e=new Error('timeout');e.name='TimeoutError';throw e;}return Response.json({choices:[{message:{content:'<think>reasoning</think>\n{"ok":true}'}}]});}});
  assert.equal(tRes.model,'reviewer');assert.equal(tRes.data.ok,true);
- let sentBody;const nRes=await directJson({base:config.base,models:['nvidia/nemotron-3-ultra-550b-a55b'],key:'k'},[],{fetchImpl:async(_u,init)=>{sentBody=JSON.parse(init.body);return Response.json({choices:[{message:{content:'Here is the JSON:\n{"ok":true}\nDone.'}}]});}});
+ let sentBody;const nRes=await directJson({base:config.base,models:['nvidia/nemotron-3.5-super-vl-120b-a12b'],key:'k'},[],{fetchImpl:async(_u,init)=>{sentBody=JSON.parse(init.body);return Response.json({choices:[{message:{content:'Here is the JSON:\n{"ok":true}\nDone.'}}]});}});
  assert.deepEqual(sentBody.chat_template_kwargs,{enable_thinking:false});assert.equal(nRes.data.ok,true);
  await assert.rejects(()=>directJson(config,[],{fetchImpl:async()=>new Response('',{status:402})}),/no alternate provider/);
  await assert.rejects(()=>directJson(config,[],{exclude:config.models}),/independent/);
