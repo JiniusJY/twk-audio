@@ -579,7 +579,13 @@ async function writeEpisode(episodesRoot) {
       previous,
       writer: args.writer,
     };
-    const chapter = direct ? await directChapter(chapterRequest) : await fetchDraft(baseUrl, secret, "", chapterRequest, { attempts: 4, retryWriterErrors: true });
+    const chapter = direct
+      ? await withRetry(() => directChapter(chapterRequest), {
+          label: `Chapter ${index + 1} scene ${part + 1}`,
+          attempts: 4,
+          shouldRetry: (error) => /Invalid dialogue scene|Podcast editorial review required/i.test(String(error.message)),
+        })
+      : await fetchDraft(baseUrl, secret, "", chapterRequest, { attempts: 4, retryWriterErrors: true });
     assertScriptQuality({ ...episode, turns: [...progress.completed.flatMap(c => c.turns), ...chapter.turns] });
     progress.completed.push(chapter);
     const pendingCheckpoint = `${checkpoint}.tmp`;
