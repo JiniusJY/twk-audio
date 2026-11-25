@@ -46,6 +46,7 @@ jobs:
       PODCAST_EXECUTION: github
       NVIDIA_API_KEY: ${{ secrets.NVIDIA_API_KEY }}
       FISH_AUDIO_API_KEY: ${{ secrets.FISH_AUDIO_API_KEY }}
+      TAVILY_API_KEY: ${{ secrets.TAVILY_API_KEY }}
       TTS_PROVIDER: fish
       FISH_AUDIO_MODEL: ${{ vars.FISH_AUDIO_MODEL || 's2.1-pro-free' }}
       TWK_AUTOMATION_URL: ${{ secrets.TWK_AUTOMATION_URL }}

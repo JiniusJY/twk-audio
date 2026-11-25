@@ -89,17 +89,25 @@ export function readPublicPage(raw, hops = 0) {
           return reject(new Error('Source unavailable'));
         }
         let bytes = 0;
+        let settled = false;
         const chunks = [];
+        const finish = (fn, val) => {
+          if (settled) return;
+          settled = true;
+          fn(val);
+        };
         res.on('data', (c) => {
+          if (settled) return;
           bytes += c.length;
-          if (bytes > 600000) {
-            request.destroy(new Error('Source too large'));
+          if (bytes > 1500000) {
+            finish(resolve, Buffer.concat(chunks).toString('utf8'));
+            request.destroy();
             return;
           }
           chunks.push(c);
         });
-        res.on('error', reject);
-        res.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')));
+        res.on('error', (err) => finish(reject, err));
+        res.on('end', () => finish(resolve, Buffer.concat(chunks).toString('utf8')));
       },
     );
     request.on('timeout', () => request.destroy(new Error('Source timeout')));
@@ -107,10 +115,86 @@ export function readPublicPage(raw, hops = 0) {
   });
 }
 
-export async function collectEvidence(sources, read = readPublicPage) {
-  return Promise.all(
-    sources.map(async (source) => {
-      const upstream = [];
+export async function fetchTavilyFallback(source, { apiKey = process.env.TAVILY_API_KEY, fetchImpl = fetch } = {}) {
+  if (!apiKey) return [];
+  const upstream = [];
+  const externalUrls = [...new Set(source.originalUrls || [])]
+    .filter((raw) => {
+      try {
+        const u = new URL(raw);
+        return u.protocol === 'https:' && u.hostname !== 'techwhoknows.com' && !u.hostname.endsWith('.techwhoknows.com');
+      } catch {
+        return false;
+      }
+    })
+    .slice(0, 3);
+
+  const pushEntry = (url, rawText) => {
+    const text = decodeHtmlEntities(String(rawText || ''))
+      .replace(/\s+/g, ' ')
+      .trim()
+      .slice(0, 16000);
+    if (text.length < 300 || /just a moment|verify you are human|access denied/i.test(text.slice(0, 600))) return;
+    upstream.push({
+      url,
+      text,
+      sha256: createHash('sha256').update(text).digest('hex'),
+      retrievedAt: new Date().toISOString(),
+    });
+  };
+
+  if (externalUrls.length) {
+    try {
+      const res = await fetchImpl('https://api.tavily.com/extract', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ urls: externalUrls }),
+        signal: AbortSignal.timeout(20000),
+      });
+      if (res.ok) {
+        const data = await res.json().catch(() => null);
+        for (const item of data?.results || []) {
+          if (item?.url && item?.raw_content) pushEntry(item.url, item.raw_content);
+        }
+      } else {
+        await res.body?.cancel().catch(() => {});
+      }
+    } catch {}
+  }
+
+  if (!upstream.length && source.title) {
+    try {
+      const res = await fetchImpl('https://api.tavily.com/search', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          query: source.title,
+          max_results: 3,
+          include_raw_content: true,
+          exclude_domains: ['techwhoknows.com'],
+        }),
+        signal: AbortSignal.timeout(20000),
+      });
+      if (res.ok) {
+        const data = await res.json().catch(() => null);
+        for (const item of data?.results || []) {
+          if (item?.url && (item?.raw_content || item?.content)) {
+            pushEntry(item.url, item.raw_content || item.content);
+          }
+        }
+      } else {
+        await res.body?.cancel().catch(() => {});
+      }
+    } catch {}
+  }
+
+  return upstream;
+}
+
+export async function collectEvidence(sources, read = readPublicPage, { tavilyKey = process.env.TAVILY_API_KEY, fetchImpl = fetch } = {}) {
+  const results = await Promise.all(
+    sources.map(async (source, idx) => {
+      let upstream = [];
       for (const url of [...new Set(source.originalUrls || [])].slice(0, 3)) {
         try {
           const host = new URL(url).hostname;
@@ -126,8 +210,17 @@ export async function collectEvidence(sources, read = readPublicPage) {
           });
         } catch {}
       }
-      if (!upstream.length) throw new Error(`Original source verification blocked for ${source.id}`);
+      if (!upstream.length && tavilyKey) {
+        upstream = await fetchTavilyFallback(source, { apiKey: tavilyKey, fetchImpl });
+      }
+      if (!upstream.length) {
+        if (idx === 0) throw new Error(`Original source verification blocked for ${source.id}`);
+        return null;
+      }
       return { ...source, upstream };
     }),
   );
+  const valid = results.filter(Boolean);
+  if (!valid.length) throw new Error(`Original source verification blocked for ${sources[0]?.id || 'src-1'}`);
+  return valid;
 }

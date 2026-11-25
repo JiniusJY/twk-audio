@@ -20,7 +20,7 @@ import { parseArgs } from "node:util";
 import { cacheKey, readCache, writeCache, pruneCache } from "./cache.mjs";
 import { cachedSpeech, speechIdentity } from "./speech-cache.mjs";
 import { modelConfig } from "./direct-model.mjs";
-import { directPlan, directChapter, directReview, directRepairTurns } from "./direct-editor.mjs";
+import { directPlan, directChapter, directReview, directRepairTurns, extractIssueTurnTargets } from "./direct-editor.mjs";
 import { assertFreeFish } from "./fish-cost-guard.mjs";
 import { publishPodcastFiles } from "./publish.mjs";
 import { EDITORIAL_VERSION, assertScriptQuality, continuityContext, scriptIdentity } from "./editorial.mjs";
@@ -617,7 +617,12 @@ async function writeEpisode(episodesRoot) {
       data = cachedPlan;
       log(`Reused cached outline (${cachedPlan.model}).`);
     } else {
-      data = await directPlan(exported.snapshot, Number(args.minutes));
+      data = await withRetry(() => directPlan(exported.snapshot, Number(args.minutes)), {
+        label: "Episode outline",
+        attempts: 3,
+        baseMs: 2000,
+        shouldRetry: (err) => /Invalid evidence outline|Invalid model JSON|TimeoutError|aborted due to timeout/i.test(String(err?.message || err)),
+      });
       await writeCache(CACHE_DIR, "plans", planKey, JSON.stringify(data)).catch((error) => {
         log(`Plan cache write skipped: ${error.code || error.message}`);
       });
@@ -743,19 +748,32 @@ async function writeEpisode(episodesRoot) {
       }
       break;
     } catch (err) {
-      const flagged = err?.auditFailure?.unsupportedTurns || [];
+      const rawFlagged = err?.auditFailure?.unsupportedTurns || [];
       const issues = err?.auditFailure?.issues || [];
+      const flagged = rawFlagged.length ? rawFlagged : extractIssueTurnTargets(issues, script.turns);
       if (!direct || repairRound === 2 || (!flagged.length && !issues.length)) {
         throw err;
       }
+      if (!flagged.length) {
+        log(`Evidence review reported general issue(s) without turn indices; retrying review (${repairRound + 1}/2)...`);
+        continue;
+      }
       log(`Repairing ${flagged.length} flagged turn(s) before re-review (round ${repairRound + 1}/2)...`);
-      const repaired = await directRepairTurns({
-        script,
-        sources: episode.sources,
-        flaggedTurns: flagged,
-        issues,
-      });
-      script.turns = repaired.turns;
+      const repaired = await withRetry(
+        () => directRepairTurns({
+          script,
+          sources: episode.sources,
+          flaggedTurns: flagged,
+          issues,
+        }),
+        {
+          label: "Turn repair",
+          attempts: 3,
+          baseMs: 2000,
+          shouldRetry: (e) => /Invalid turn repair|Invalid model JSON|Podcast editorial review required|TimeoutError|aborted due to timeout/i.test(String(e?.message || e)),
+        },
+      );
+      script.turns = stripRedundantResumePrefix(repaired.turns);
       if (repaired.model && !script.writerModels.includes(repaired.model)) {
         script.writerModels = [...script.writerModels, repaired.model];
       }
@@ -1080,4 +1098,4 @@ if (isDirectRun) {
   }));
 }
 
-export { normalizeForSpeech, stripDeliveryTags, stripRedundantResumePrefix, trimSilence, encodeWav, makeNoteFlipSfx, parseRetryAfterMs, withRetry, mapWithConcurrency, decodeAudioToFloat32, resolveFfmpeg };
+export { normalizeForSpeech, stripDeliveryTags, stripRedundantResumePrefix, trimSilence, encodeWav, makeNoteFlipSfx, parseRetryAfterMs, withRetry, mapWithConcurrency, decodeAudioToFloat32, resolveFfmpeg, runFfmpeg };

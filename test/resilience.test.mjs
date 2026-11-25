@@ -1,12 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFile, rm, mkdtemp } from 'node:fs/promises';
+import { readFile, rm, mkdtemp, stat } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { decodeHtmlEntities, extractReadableText, collectEvidence } from '../podcast/source-evidence.mjs';
 import { parseModelJson, directJson } from '../podcast/direct-model.mjs';
-import { directReview, directPlan, directChapter, directRepairTurns, validateAudit, normQuote } from '../podcast/direct-editor.mjs';
-import { withRetry, decodeAudioToFloat32, resolveFfmpeg } from '../podcast/generate-podcast.mjs';
+import { directReview, directPlan, directChapter, directRepairTurns, validateAudit, normQuote, quoteMatchesText } from '../podcast/direct-editor.mjs';
+import { withRetry, decodeAudioToFloat32, resolveFfmpeg, runFfmpeg } from '../podcast/generate-podcast.mjs';
 import { cacheKey, readCache, writeCache } from '../podcast/cache.mjs';
 
 test('source-evidence decodes HTML entities and strips nav/footer boilerplate', async () => {
@@ -323,4 +323,251 @@ test('directReview attaches auditFailure without burning slice retries, and dire
   assert.equal(repaired.turns[25].speaker, 'B');
   assert.match(repaired.turns[25].text, /35 percent/);
   assert.equal(repaired.turns[0].text, turns[0].text);
+});
+
+test('quoteMatchesText handles HTML spacing/punctuation drift and ffmpeg f32le pipe produces valid MP3', async () => {
+  const upstream = 'OpenAI published Perplexity and Intelligence ( Table 1 ) showing 12.5% lower compute overhead on reasoning benchmarks across 48 clusters.';
+  assert.equal(quoteMatchesText('Perplexity and Intelligence (Table 1) showing 12.5% lower compute overhead', upstream), true);
+  assert.equal(
+    quoteMatchesText(
+      'OpenAI published Perplexity and Intelligence showing 12.5% lower compute overhead on reasoning benchmarks across 48 clusters',
+      upstream,
+    ),
+    true,
+  );
+  assert.equal(quoteMatchesText('Completely fabricated quote not in any upstream article', upstream), false);
+  assert.equal(quoteMatchesText('too short', upstream), false);
+
+  const sources = [{
+    id: 'src-4',
+    title: 'OpenAI',
+    url: 'https://site/story',
+    upstream: [{ url: 'https://www.openai.com/index/perplexity-and-intelligence?utm_source=x', text: upstream }],
+  }];
+  const turns = [{ speaker: 'A', text: 'OpenAI reported 12.5% lower compute overhead.', citations: ['src-4'] }];
+  validateAudit({
+    issues: [],
+    centralClaims: [{
+      claim: '12.5% lower compute',
+      sourceId: 'src-4',
+      url: 'https://openai.com/index/perplexity-and-intelligence',
+      quote: 'Perplexity and Intelligence (Table 1) showing 12.5% lower compute overhead',
+      kind: 'primary',
+      verified: true,
+    }],
+    turns: [{ index: 0, supported: true, sourceIds: ['src-4'], reason: 'Verified' }],
+  }, turns, sources);
+
+  const ffmpeg = await resolveFfmpeg();
+  const tmpOut = await mkdtemp(path.join(os.tmpdir(), 'twk-mp3-pipe-'));
+  try {
+    const samples = new Float32Array(24000 * 2);
+    for (let i = 0; i < samples.length; i++) {
+      samples[i] = Math.sin((2 * Math.PI * 440 * i) / 24000) * 0.2;
+    }
+    const pcmBuffer = Buffer.from(samples.buffer, samples.byteOffset, samples.byteLength);
+    const mp3Path = path.join(tmpOut, 'out.mp3');
+    await runFfmpeg(
+      ffmpeg,
+      [
+        '-hide_banner', '-loglevel', 'error', '-y',
+        '-f', 'f32le', '-ar', '24000', '-ac', '1', '-i', 'pipe:0',
+        '-af', 'loudnorm=I=-16:TP=-1.5:LRA=11',
+        '-codec:a', 'libmp3lame', '-ar', '24000', '-b:a', '96k', '-compression_level', '2',
+        mp3Path,
+      ],
+      { inputBuffer: pcmBuffer },
+    );
+    const info = await stat(mp3Path);
+    assert.ok(info.size > 5000);
+  } finally {
+    await rm(tmpOut, { recursive: true, force: true });
+  }
+});
+
+test('collectEvidence drops blocked secondary sources, reserves reviewer, loosens plan/chapter/kind, and repairs issue-only failures', async () => {
+  const goodHtml = '<main>' + 'Primary source reports 2x faster training throughput on new clusters. '.repeat(12) + '</main>';
+  const filtered = await collectEvidence(
+    [
+      { id: 'src-1', title: 'Primary', url: 'https://site/1', originalUrls: ['https://vendor.test/1'] },
+      { id: 'src-2', title: 'Blocked Secondary', url: 'https://site/2', originalUrls: ['https://blocked.test/2'] },
+    ],
+    async (u) => {
+      if (u.includes('blocked.test')) throw new Error('Cloudflare blocked');
+      return goodHtml;
+    },
+  );
+  assert.equal(filtered.length, 1);
+  assert.equal(filtered[0].id, 'src-1');
+
+  await assert.rejects(
+    () => collectEvidence(
+      [
+        { id: 'src-1', title: 'Blocked Primary', url: 'https://site/1', originalUrls: ['https://blocked.test/1'] },
+        { id: 'src-2', title: 'Good Secondary', url: 'https://site/2', originalUrls: ['https://vendor.test/2'] },
+      ],
+      async (u) => (u.includes('blocked.test') ? Promise.reject(new Error('blocked')) : goodHtml),
+    ),
+    /Original source verification blocked for src-1/,
+  );
+
+  let planExclude = null;
+  const plan = await directPlan(
+    {
+      slug: 'ep-test',
+      episodeNumber: 1,
+      title: 'T',
+      hosts: { A: { name: 'Jade' }, B: { name: 'Alok' } },
+      sources: filtered,
+      subscribeTurns: [],
+    },
+    30,
+    {
+      config: { base: 'https://integrate.api.nvidia.com/v1', models: ['writer', 'reviewer'], key: 'k' },
+      collect: async () => filtered,
+      call: async (_cfg, _msgs, opts) => {
+        planExclude = opts?.exclude;
+        return {
+          model: 'writer',
+          data: {
+            title: 'Cluster speed',
+            description: 'Test',
+            targetMinutes: 24.6,
+            chapters: [
+              { title: 'One', brief: 'A', sourceIds: ['src-1', 'bad-id'] },
+              { title: 'Two', brief: 'B', sourceIds: ['src-1'] },
+            ],
+          },
+        };
+      },
+    },
+  );
+  assert.deepEqual(planExclude, ['reviewer']);
+  assert.equal(plan.plan.targetMinutes, 25);
+  assert.deepEqual(plan.plan.chapters[0].sourceIds, ['src-1']);
+
+  let chapterExclude = null;
+  const scene = await directChapter(
+    { plan: plan.plan, index: 0, part: 0, previous: '' },
+    {
+      config: { base: 'https://integrate.api.nvidia.com/v1', models: ['writer', 'reviewer'], key: 'k' },
+      call: async (_cfg, _msgs, opts) => {
+        chapterExclude = opts?.exclude;
+        return {
+          model: 'writer',
+          data: {
+            turns: [
+              { speaker: 'A', text: 'What changed here?' },
+              { speaker: 'B', text: 'Training throughput doubled.', citations: ['src-1'] },
+              { speaker: 'A', text: 'Any caveats?' },
+              { speaker: 'B', text: 'Only on the new clusters.', citations: ['src-1'] },
+            ],
+          },
+        };
+      },
+    },
+  );
+  assert.deepEqual(chapterExclude, ['reviewer']);
+  assert.deepEqual(scene.turns[0].citations, []);
+
+  validateAudit(
+    {
+      issues: [],
+      centralClaims: [{
+        claim: '2x faster',
+        sourceId: 'src-1',
+        url: 'https://vendor.test/1',
+        quote: 'Primary source reports 2x faster training throughput on new clusters',
+        kind: 'report',
+        verified: true,
+      }],
+      turns: scene.turns.map((_, index) => ({ index, supported: true, sourceIds: ['src-1'], reason: 'ok' })),
+    },
+    scene.turns,
+    filtered,
+  );
+
+  let repairExclude = null;
+  const repaired = await directRepairTurns(
+    {
+      script: { hosts: { A: { name: 'Jade' }, B: { name: 'Alok' } }, turns: scene.turns },
+      sources: filtered,
+      flaggedTurns: [],
+      issues: ['Turn 1 needs clearer attribution'],
+    },
+    {
+      config: { base: 'https://integrate.api.nvidia.com/v1', models: ['writer', 'reviewer'], key: 'k' },
+      call: async (_cfg, _msgs, opts) => {
+        repairExclude = opts?.exclude;
+        return {
+          model: 'writer',
+          data: {
+            replacements: [{
+              index: 1,
+              speaker: 'B',
+              text: 'The primary source reports 2x faster training throughput on the new clusters.',
+              citations: ['src-1'],
+            }],
+          },
+        };
+      },
+    },
+  );
+  assert.deepEqual(repairExclude, ['reviewer']);
+  assert.match(repaired.turns[1].text, /primary source reports 2x faster/i);
+});
+
+test('collectEvidence uses Tavily extract and search fallback when direct fetch is blocked', async () => {
+  const blockedSources = [{
+    id: 'src-1',
+    title: 'OpenAI GPT-6 protein design study',
+    url: 'https://site/story',
+    originalUrls: ['https://blocked-site.test/paper'],
+  }];
+
+  const extracted = await collectEvidence(
+    blockedSources,
+    async () => { throw new Error('Cloudflare 403'); },
+    {
+      tavilyKey: 'tvly-test',
+      fetchImpl: async (url) => {
+        if (url === 'https://api.tavily.com/extract') {
+          return Response.json({
+            results: [{
+              url: 'https://blocked-site.test/paper',
+              raw_content: 'OpenAI researchers demonstrated functional protein design via reasoning and code. '.repeat(8),
+            }],
+          });
+        }
+        throw new Error('Unexpected call');
+      },
+    },
+  );
+  assert.equal(extracted[0].upstream.length, 1);
+  assert.match(extracted[0].upstream[0].text, /functional protein design/);
+
+  const searched = await collectEvidence(
+    blockedSources,
+    async () => { throw new Error('Cloudflare 403'); },
+    {
+      tavilyKey: 'tvly-test',
+      fetchImpl: async (url) => {
+        if (url === 'https://api.tavily.com/extract') {
+          return Response.json({ results: [] });
+        }
+        if (url === 'https://api.tavily.com/search') {
+          return Response.json({
+            results: [{
+              url: 'https://mirror.test/protein-study',
+              content: 'Lab tests confirmed binding for designed proteins generated by the reasoning model. '.repeat(8),
+            }],
+          });
+        }
+        throw new Error('Unexpected call');
+      },
+    },
+  );
+  assert.equal(searched[0].upstream.length, 1);
+  assert.equal(searched[0].upstream[0].url, 'https://mirror.test/protein-study');
+  assert.match(searched[0].upstream[0].text, /confirmed binding/);
 });
