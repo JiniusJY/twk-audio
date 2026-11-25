@@ -533,18 +533,22 @@ export async function draftSceneWithRetry({
   chapterRequest,
   label,
   draftFn,
-  attempts = 4,
+  attempts = 6,
 }) {
-  let lastFailure = "";
+  const failures = [];
   return withRetry(
     async () => {
-      const request = lastFailure ? { ...chapterRequest, retryFeedback: lastFailure } : chapterRequest;
+      const request = failures.length ? { ...chapterRequest, retryFeedback: failures.join("; ") } : chapterRequest;
       try {
         const candidate = await draftFn(request);
         assertScriptQuality({ ...episode, turns: [...completedTurns, ...candidate.turns] });
         return candidate;
       } catch (error) {
-        lastFailure = error instanceof Error ? error.message : String(error);
+        const msg = error instanceof Error ? error.message : String(error);
+        if (!failures.includes(msg)) {
+          failures.push(msg);
+          if (failures.length > 2) failures.shift();
+        }
         throw error;
       }
     },
