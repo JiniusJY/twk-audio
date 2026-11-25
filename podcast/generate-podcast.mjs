@@ -527,6 +527,38 @@ function fetchDraft(baseUrl, secret, slugPath, body, { attempts = 3, retryWriter
   });
 }
 
+export async function draftSceneWithRetry({
+  episode,
+  completedTurns,
+  chapterRequest,
+  label,
+  draftFn,
+  attempts = 4,
+}) {
+  let lastFailure = "";
+  return withRetry(
+    async () => {
+      const request = lastFailure ? { ...chapterRequest, retryFeedback: lastFailure } : chapterRequest;
+      try {
+        const candidate = await draftFn(request);
+        assertScriptQuality({ ...episode, turns: [...completedTurns, ...candidate.turns] });
+        return candidate;
+      } catch (error) {
+        lastFailure = error instanceof Error ? error.message : String(error);
+        throw error;
+      }
+    },
+    {
+      label,
+      attempts,
+      shouldRetry: (error) =>
+        /Invalid dialogue scene|Podcast editorial review required|Invalid model JSON|TimeoutError|aborted due to timeout/i.test(
+          String(error.message),
+        ),
+    },
+  );
+}
+
 async function writeEpisode(episodesRoot) {
   const baseUrl = (process.env.TWK_AUTOMATION_URL || "").replace(/\/$/, "");
   const secret = process.env.AUTOMATION_INGEST_SECRET || "";
@@ -579,14 +611,16 @@ async function writeEpisode(episodesRoot) {
       previous,
       writer: args.writer,
     };
-    const chapter = direct
-      ? await withRetry(() => directChapter(chapterRequest), {
-          label: `Chapter ${index + 1} scene ${part + 1}`,
-          attempts: 4,
-          shouldRetry: (error) => /Invalid dialogue scene|Podcast editorial review required/i.test(String(error.message)),
-        })
-      : await fetchDraft(baseUrl, secret, "", chapterRequest, { attempts: 4, retryWriterErrors: true });
-    assertScriptQuality({ ...episode, turns: [...progress.completed.flatMap(c => c.turns), ...chapter.turns] });
+    const chapter = await draftSceneWithRetry({
+      episode,
+      completedTurns: progress.completed.flatMap((c) => c.turns),
+      chapterRequest,
+      label: `Chapter ${index + 1} scene ${part + 1}`,
+      draftFn: (req) =>
+        direct
+          ? directChapter(req)
+          : fetchDraft(baseUrl, secret, "", req, { attempts: 2, retryWriterErrors: true }),
+    });
     progress.completed.push(chapter);
     const pendingCheckpoint = `${checkpoint}.tmp`;
     await writeFile(pendingCheckpoint, JSON.stringify(progress, null, 2));

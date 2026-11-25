@@ -36,6 +36,7 @@ const { values: args } = parseArgs({
     sample: { type: "string" },
     "dry-run": { type: "boolean", default: false },
     shard: { type: "string", default: "0/1" },
+    days: { type: "string" },
   },
 });
 
@@ -292,7 +293,9 @@ async function main() {
   }
   if (!baseUrl || !secret) throw new Error("Set TWK_AUTOMATION_URL and AUTOMATION_INGEST_SECRET.");
 
-  const { pending: all, total } = await api("GET", null, `?limit=${Number(args.limit) || 40}&voice=${args.voice}`);
+  const daysParam = args.days ? Number(args.days) : 0;
+  const daysQuery = Number.isInteger(daysParam) && daysParam > 0 ? `&days=${daysParam}` : "";
+  const { pending: all, total } = await api("GET", null, `?limit=${Number(args.limit) || 40}&voice=${args.voice}${daysQuery}`);
   const pending = all.filter((_, i) => i % (shardCount || 1) === (shardIndex || 0));
   log(`${pending.length} stories to read in this worker (${all.length} waiting, ${total} published)`);
   if (pending.length === 0) return;

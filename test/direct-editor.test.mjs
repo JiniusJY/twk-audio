@@ -46,3 +46,22 @@ test('GitHub-first episode rerender cannot silently use the Vercel relay',async(
  const child=spawnSync(process.execPath,['podcast/generate-podcast.mjs','--episode','fixture','--no-publish'],{encoding:'utf8',env:{...process.env,PODCAST_EXECUTION:'github',NVIDIA_API_KEY:'fixture',FISH_AUDIO_API_KEY:''}});
  assert.notEqual(child.status,0);assert.match(child.stderr,/requires direct Fish credential/);assert.doesNotMatch(child.stderr,/ENOENT/);
 });
+
+test('directChapter includes retryFeedback and throws descriptive Invalid dialogue scene errors',async()=>{
+ const outline={title:'A launch',description:'Grounded update',targetMinutes:8,chapters:[{title:'AI features',brief:'Explain controls',sourceIds:['src-1']},{title:'Limits',brief:'Check availability',sourceIds:['src-1']}]};
+ const plan=await directPlan(snapshot,10,{config,collect:async()=>sources,call:async()=>({model:'writer',data:outline})});
+ let seenPrompt='';
+ await directChapter({plan:plan.plan,index:0,part:0,previous:'',retryFeedback:'Turn 39: repeats sentence from turn 35'},{
+  config,
+  call:async(_c,m)=>{seenPrompt=m[1].content;return {model:'writer',data:{turns}};}
+ });
+ assert.match(seenPrompt,/Turn 39: repeats sentence from turn 35/);
+ await assert.rejects(
+  ()=>directChapter({plan:plan.plan,index:0,part:0,previous:''},{config,call:async()=>({model:'writer',data:{turns:turns.slice(0,2)}})}),
+  /Invalid dialogue scene: expected 4-100 turns, got 2/
+ );
+ await assert.rejects(
+  ()=>directChapter({plan:plan.plan,index:0,part:0,previous:''},{config,call:async()=>({model:'writer',data:{turns:[...turns.slice(0,3),{speaker:'B',text:'   ',citations:['src-1']}]}})}),
+  /Invalid dialogue scene: turn 4 has empty text/
+ );
+});

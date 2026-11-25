@@ -10,6 +10,7 @@ import {
   parseRetryAfterMs,
   withRetry,
   mapWithConcurrency,
+  draftSceneWithRetry,
 } from "../podcast/generate-podcast.mjs";
 
 test("normalizeForSpeech splits fused ALLCAPS compounds", () => {
@@ -178,4 +179,31 @@ test("withRetry uses cooldown-aware backoff on 429 or cooling-down messages with
   );
   assert.equal(result, "recovered");
   assert.deepEqual(waits, [35_000, 70_000, 95_000]);
+});
+
+test("draftSceneWithRetry retries cross-scene repetition and forwards feedback", async () => {
+  const repeated = "This specific benchmark claim is confirmed by two separate engineering reports from the vendor.";
+  const episode = { hosts: { A: { name: "Jade Chen" }, B: { name: "Alok Nair" } } };
+  const completedTurns = [{ speaker: "A", text: repeated }];
+  const seenFeedback = [];
+  let calls = 0;
+  const result = await draftSceneWithRetry({
+    episode,
+    completedTurns,
+    chapterRequest: { index: 1, part: 0 },
+    label: "Chapter 2 scene 1",
+    attempts: 3,
+    draftFn: async (req) => {
+      calls++;
+      seenFeedback.push(req.retryFeedback || null);
+      if (calls === 1) {
+        return { model: "writer", words: 15, turns: [{ speaker: "B", text: repeated }] };
+      }
+      return { model: "writer", words: 12, turns: [{ speaker: "B", text: "Fresh follow-up point with completely new wording and details." }] };
+    },
+  });
+  assert.equal(calls, 2);
+  assert.equal(seenFeedback[0], null);
+  assert.match(seenFeedback[1], /repeats sentence from turn 1/);
+  assert.equal(result.turns[0].text, "Fresh follow-up point with completely new wording and details.");
 });

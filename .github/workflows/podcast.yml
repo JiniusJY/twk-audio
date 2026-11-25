@@ -2,7 +2,7 @@ name: Podcast episode
 
 on:
   schedule:
-    - cron: "0 0,6,12,18 * * *" # 4x/day backstop (08:00, 14:00, 20:00, 02:00 SGT)
+    - cron: "0 0,12 * * *" # 2x/day backstop (08:00 and 20:00 SGT)
   workflow_dispatch:
     inputs:
       episode:

@@ -25,10 +25,19 @@ export async function directPlan(snapshot,minutes,{config=modelConfig(),call=dir
  return {pending:true,model:reply.model,plan:{...snapshot,...p,sources}};
 }
 export async function directChapter(input,{config=modelConfig(),call=directJson}={}){
- const {plan,index,part,previous}=input,chapter=plan.chapters[index];
- const reply=await call(config,[SYSTEM,{role:'user',content:`Write half ${part+1} of chapter ${index+1}: ${JSON.stringify(chapter)}. Other chapters: ${JSON.stringify(plan.chapters)}. Host A=${plan.hosts.A.name}, B=${plan.hosts.B.name}. Preserve identities. Answer any pending question as the OTHER host. Don't repeat prior points, restart introductions, address your own name or invent personal experience. Speak simply with contractions. No generic AI phrases or manufactured debate. Word target is a ceiling, not a quota, maximum ${Math.round(plan.targetMinutes*145/plan.chapters.length/2*1.15)} words. Return {turns:[{speaker:"A" or "B",text,citations:["src-1"],ttsText:optional pronunciation only,pauseBeforeMs:optional integer0to1500}]}. Cite every consequential fact. End first half with a useful question, second half with an answer/bridge.\nFull prior dialogue:\n${previous}\nSources:${JSON.stringify(plan.sources.filter(s=>chapter.sourceIds.includes(s.id)))}`}]);
- const turns=reply.data.turns;
- if(!Array.isArray(turns)||turns.length<4||turns.length>100||turns.some(t=>typeof t.text!=='string'||!t.text.trim()||t.text.length>1400||!Array.isArray(t.citations)||t.citations.some(id=>!chapter.sourceIds.includes(id))||t.segment!==undefined||t.ttsText!=null&&(typeof t.ttsText!=='string'||t.ttsText.length>1800)))throw new Error('Invalid dialogue scene');
+ const {plan,index,part,previous,retryFeedback}=input,chapter=plan.chapters[index];
+ const feedbackNote=retryFeedback?`\nPrevious attempt was rejected (${retryFeedback}). Fix this issue completely and do not repeat any sentence from earlier turns.`:'';
+ const reply=await call(config,[SYSTEM,{role:'user',content:`Write half ${part+1} of chapter ${index+1}: ${JSON.stringify(chapter)}. Other chapters: ${JSON.stringify(plan.chapters)}. Host A=${plan.hosts.A.name}, B=${plan.hosts.B.name}. Preserve identities. Answer any pending question as the OTHER host. Don't repeat prior points, restart introductions, address your own name or invent personal experience. Speak simply with contractions. No generic AI phrases or manufactured debate. Word target is a ceiling, not a quota, maximum ${Math.round(plan.targetMinutes*145/plan.chapters.length/2*1.15)} words. Return {turns:[{speaker:"A" or "B",text,citations:["src-1"],ttsText:optional pronunciation only,pauseBeforeMs:optional integer0to1500}]}. Cite every consequential fact. End first half with a useful question, second half with an answer/bridge.${feedbackNote}\nFull prior dialogue:\n${previous}\nSources:${JSON.stringify(plan.sources.filter(s=>chapter.sourceIds.includes(s.id)))}`}]);
+ const turns=reply.data?.turns;
+ if(!Array.isArray(turns))throw new Error('Invalid dialogue scene: turns must be an array');
+ if(turns.length<4||turns.length>100)throw new Error(`Invalid dialogue scene: expected 4-100 turns, got ${turns.length}`);
+ for(const [i,t] of turns.entries()){
+  if(typeof t?.text!=='string'||!t.text.trim())throw new Error(`Invalid dialogue scene: turn ${i+1} has empty text`);
+  if(t.text.length>1400)throw new Error(`Invalid dialogue scene: turn ${i+1} text exceeds 1400 chars`);
+  if(!Array.isArray(t.citations)||t.citations.some(id=>!chapter.sourceIds.includes(id)))throw new Error(`Invalid dialogue scene: turn ${i+1} has invalid citations`);
+  if(t.segment!==undefined)throw new Error(`Invalid dialogue scene: turn ${i+1} must not set segment`);
+  if(t.ttsText!=null&&(typeof t.ttsText!=='string'||t.ttsText.length>1800))throw new Error(`Invalid dialogue scene: turn ${i+1} has invalid ttsText`);
+ }
  assertScriptQuality({...plan,turns});
  return {model:reply.model,words:turns.reduce((n,t)=>n+t.text.split(/\s+/).length,0),turns:[...turns.map((t,i)=>({...t,...(i===0?{chapter:chapter.title}:{})})),...(part===1 && index===Math.max(0,Math.floor(plan.chapters.length/2)-1)?plan.subscribeTurns||[]:[])]};
 }

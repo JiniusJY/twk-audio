@@ -5,7 +5,7 @@ name: Article audio
 # the hourly cron is only a backstop (GitHub delays scheduled runs by many hours).
 on:
   schedule:
-    - cron: "20 * * * *"
+    - cron: "20 1,13 * * *" # 2x/day backstop (09:20 and 21:20 SGT)
     - cron: "0 3 1 * *" # monthly keep-alive (see the keepalive job)
   workflow_dispatch:
     inputs:
@@ -36,6 +36,7 @@ jobs:
     outputs:
       remaining: ${{ steps.check.outputs.remaining }}
       shards: ${{ steps.check.outputs.shards }}
+      days: ${{ steps.check.outputs.days }}
     steps:
       - name: Check for stories without audio
         id: check
@@ -45,13 +46,20 @@ jobs:
           WORKERS: ${{ github.event.inputs.workers || '1' }}
         run: |
           set -o pipefail
+          days_query=""
+          days_flag=""
+          if [[ "${{ github.event_name }}" != "workflow_dispatch" ]]; then
+            days_query="&days=14"
+            days_flag="14"
+          fi
           remaining=$(curl -fsS --retry 3 \
             -H "Authorization: Bearer $AUTOMATION_INGEST_SECRET" \
-            "$TWK_AUTOMATION_URL/api/automation/audio?limit=0&voice=bf_emma" | jq -r '.remaining')
+            "$TWK_AUTOMATION_URL/api/automation/audio?limit=0&voice=bf_emma${days_query}" | jq -r '.remaining')
           echo "Stories waiting for audio: $remaining"
           workers=$(( WORKERS < 1 ? 1 : (WORKERS > 12 ? 12 : WORKERS) ))
           echo "remaining=$remaining" >> "$GITHUB_OUTPUT"
           echo "shards=$(jq -cn --argjson n "$workers" '[range(0; $n)] | map({index: ., count: $n})')" >> "$GITHUB_OUTPUT"
+          echo "days=$days_flag" >> "$GITHUB_OUTPUT"
 
   generate:
     needs: check
@@ -98,10 +106,15 @@ jobs:
 
       - name: Read stories aloud
         run: |
+          extra_args=()
+          if [[ -n "${{ needs.check.outputs.days }}" ]]; then
+            extra_args+=(--days "${{ needs.check.outputs.days }}")
+          fi
           node generate.mjs \
             --shard "${{ matrix.shard.index }}/${{ matrix.shard.count }}" \
             --limit "${{ github.event.inputs.limit || '200' }}" \
-            --max-minutes "${{ github.event.inputs.max_minutes || '150' }}"
+            --max-minutes "${{ github.event.inputs.max_minutes || '150' }}" \
+            "${extra_args[@]}"
 
   # GitHub switches off scheduled workflows in public repos after 60 days without a commit.
   # Re-enabling this workflow once a month through the API keeps the hourly schedule alive.
