@@ -19,6 +19,7 @@ import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import { cacheKey, readCache, writeCache, pruneCache } from "./cache.mjs";
 import { cachedSpeech, speechIdentity } from "./speech-cache.mjs";
+import { modelConfig } from "./direct-model.mjs";
 import { directPlan, directChapter, directReview } from "./direct-editor.mjs";
 import { assertFreeFish } from "./fish-cost-guard.mjs";
 import { publishPodcastFiles } from "./publish.mjs";
@@ -614,6 +615,10 @@ async function writeEpisode(episodesRoot) {
 }
 
 async function main() {
+  if (process.env.PODCAST_EXECUTION === "github") {
+    modelConfig();
+    if (!process.env.FISH_AUDIO_API_KEY) throw new Error("GitHub-first mode requires direct Fish credential; Vercel relay disabled");
+  }
   if (!args.episode && !args.auto) {
     console.error("Provide --episode <slug> or --auto");
     process.exit(1);

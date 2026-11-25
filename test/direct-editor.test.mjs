@@ -40,3 +40,9 @@ test('review rejects fabricated quotes, missed turns and repeated ideas',()=>{
 });
 
 test('reviewer cannot return the writer identity even if adapter misbehaves',async()=>{await assert.rejects(()=>directReview({sources,turns,writerModels:['writer']},{config,call:async()=>({model:'writer',data:audit()})}),/also wrote/);});
+
+test('GitHub-first episode rerender cannot silently use the Vercel relay',async()=>{
+ const {spawnSync}=await import('node:child_process');
+ const child=spawnSync(process.execPath,['podcast/generate-podcast.mjs','--episode','fixture','--no-publish'],{encoding:'utf8',env:{...process.env,PODCAST_EXECUTION:'github',NVIDIA_API_KEY:'fixture',FISH_AUDIO_API_KEY:''}});
+ assert.notEqual(child.status,0);assert.match(child.stderr,/requires direct Fish credential/);assert.doesNotMatch(child.stderr,/ENOENT/);
+});
