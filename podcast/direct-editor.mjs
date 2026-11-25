@@ -30,7 +30,14 @@ const normUrl = (u) => {
 
 function validateAuditSubset(audit, indexedTurns, sources) {
   if (!Array.isArray(audit?.issues)) throw new Error('Incomplete or unsupported turn audit: issues must be an array');
-  if (audit.issues.length) throw new Error(`Incomplete or unsupported turn audit: reviewer reported ${audit.issues.length} issue(s): ${audit.issues.slice(0, 3).join('; ')}`);
+  if (audit.issues.length) {
+    const unsupportedTurns = Array.isArray(audit.turns)
+      ? audit.turns.filter((t) => t.supported !== true || !t.reason).map((t) => ({ index: t.index, reason: t.reason || 'unsupported' }))
+      : [];
+    const err = new Error(`Incomplete or unsupported turn audit: reviewer reported ${audit.issues.length} issue(s): ${audit.issues.slice(0, 3).join('; ')}`);
+    err.auditFailure = { issues: audit.issues, unsupportedTurns };
+    throw err;
+  }
   const expectedIndices = indexedTurns.map((t) => t.index);
   if (!Array.isArray(audit.turns) || audit.turns.length !== expectedIndices.length) {
     throw new Error(`Incomplete or unsupported turn audit: expected ${expectedIndices.length} audited turns, got ${Array.isArray(audit.turns) ? audit.turns.length : 'non-array'}`);
@@ -40,8 +47,16 @@ function validateAuditSubset(audit, indexedTurns, sources) {
   if (seenSet.size !== expectedIndices.length || audit.turns.some((t) => !expectedSet.has(t.index))) {
     throw new Error('Incomplete or unsupported turn audit: missing or duplicate turn indices');
   }
-  const badSupport = audit.turns.find((t) => t.supported !== true || !t.reason);
-  if (badSupport) throw new Error(`Incomplete or unsupported turn audit: turn ${badSupport.index} unsupported (${badSupport.reason || 'missing reason'})`);
+  const badTurns = audit.turns.filter((t) => t.supported !== true || !t.reason);
+  if (badTurns.length) {
+    const first = badTurns[0];
+    const err = new Error(`Incomplete or unsupported turn audit: turn ${first.index} unsupported (${first.reason || 'missing reason'})`);
+    err.auditFailure = {
+      issues: [],
+      unsupportedTurns: badTurns.map((t) => ({ index: t.index, reason: t.reason || 'missing reason' })),
+    };
+    throw err;
+  }
   const badSources = audit.turns.find((t) => !Array.isArray(t.sourceIds) || t.sourceIds.some((id) => !sources.some((s) => s.id === id)));
   if (badSources) throw new Error(`Incomplete or unsupported turn audit: turn ${badSources.index} has invalid sourceIds`);
   const cited = new Set(indexedTurns.flatMap((t) => t.citations || []));
@@ -137,6 +152,7 @@ export async function directReview(input, { config = modelConfig(), call = direc
           break;
         } catch (err) {
           lastErr = err;
+          if (err?.auditFailure) throw err;
           const msg = err?.message || String(err);
           if (!/Invalid model JSON|Incomplete or unsupported|Unverified or fabricated|Central claim|Cited source|TimeoutError/i.test(msg) || attempt === 3) {
             throw err;
@@ -168,12 +184,13 @@ export async function directReview(input, { config = modelConfig(), call = direc
 
 export async function directPlan(snapshot, minutes, { config = modelConfig(), call = directJson, collect = collectEvidence } = {}) {
   const sources = await collect(snapshot.sources);
+  const promptSources = sources.map(({ id, title, url, upstream }) => ({ id, title, url, upstream }));
   const chapterGuide = minutes <= 30 ? ' Use 3 to 5 distinct chapters, no padding or repetition.' : ' Use distinct chapters, no padding or repetition.';
   const reply = await call(config, [
     SYSTEM,
     {
       role: 'user',
-      content: `Outline an episode up to ${minutes} minutes, shorter when evidence is thin.${chapterGuide} Ordinary language, natural specific questions. Return {title,description,targetMinutes,chapters:[{title,brief,sourceIds:["src-1"]}]}. The hosts must stay ${JSON.stringify(snapshot.hosts)}. Source originals outrank TWK summaries. ${JSON.stringify(sources)}`,
+      content: `Outline an episode up to ${minutes} minutes, shorter when evidence is thin.${chapterGuide} Ordinary language, natural specific questions. Return {title,description,targetMinutes,chapters:[{title,brief,sourceIds:["src-1"]}]}. The hosts must stay ${JSON.stringify(snapshot.hosts)}. Use ONLY facts present in upstream[].text. ${JSON.stringify(promptSources)}`,
     },
   ]);
   const p = reply.data;
@@ -190,9 +207,11 @@ export async function directChapter(input, { config = modelConfig(), call = dire
   const priorBlock = previous ? `\n=== ALREADY SPOKEN DIALOGUE (FOR CONTEXT ONLY — NEVER COPY, REPLAY, OR REPEAT THESE LINES) ===\n${previous}\n=== END OF ALREADY SPOKEN DIALOGUE ===\nWrite ONLY NEW turns continuing directly after the last spoken line above.` : '';
   const chapterSources = plan.sources
     .filter((s) => chapter.sourceIds.includes(s.id))
-    .map((s) => ({
-      ...s,
-      upstream: s.upstream?.map((u) => ({ ...u, text: String(u.text || '').slice(0, 10000) })),
+    .map(({ id, title, url, upstream }) => ({
+      id,
+      title,
+      url,
+      upstream: upstream?.map((u) => ({ ...u, text: String(u.text || '').slice(0, 10000) })),
     }));
   const reply = await call(
     config,
@@ -224,4 +243,83 @@ export async function directChapter(input, { config = modelConfig(), call = dire
       ...(part === 1 && index === Math.max(0, Math.floor(plan.chapters.length / 2) - 1) ? plan.subscribeTurns || [] : []),
     ],
   };
+}
+
+export async function directRepairTurns({ script, sources, flaggedTurns = [], issues = [] }, { config = modelConfig(), call = directJson } = {}) {
+  const editableFlagged = flaggedTurns
+    .filter((f) => Number.isInteger(f?.index) && f.index >= 0 && f.index < script.turns.length && script.turns[f.index]?.segment !== 'subscribe')
+    .slice(0, 12);
+  if (!editableFlagged.length) {
+    throw new Error('No editable flagged turns available for repair');
+  }
+  const targetIndices = new Set(editableFlagged.map((f) => f.index));
+  const contextIndices = new Set();
+  for (const idx of targetIndices) {
+    if (idx - 1 >= 0) contextIndices.add(idx - 1);
+    contextIndices.add(idx);
+    if (idx + 1 < script.turns.length) contextIndices.add(idx + 1);
+  }
+  const snippet = [...contextIndices]
+    .sort((a, b) => a - b)
+    .map((index) => ({ index, ...script.turns[index], needsRepair: targetIndices.has(index) }));
+  const allowedIds = sources.map((s) => s.id);
+  const compactSources = sources.map(({ id, title, url, upstream }) => ({
+    id,
+    title,
+    url,
+    upstream: upstream?.map((u) => ({ ...u, text: String(u.text || '').slice(0, 10000) })),
+  }));
+  const reply = await call(
+    config,
+    [
+      SYSTEM,
+      {
+        role: 'user',
+        content: `Rewrite ONLY the turns marked needsRepair:true to fix these audit failures so every factual claim is 100% supported by upstream[].text. Flagged turns: ${JSON.stringify(editableFlagged)}. Overall issues: ${JSON.stringify(issues)}. Host A=${script.hosts.A.name}, B=${script.hosts.B.name}. Keep the exact same index and speaker for each repaired turn. Allowed citations: ${JSON.stringify(allowedIds)} (use [] if non-factual). Return {replacements:[{index,speaker:"A" or "B",text,citations:["src-1"],ttsText:optional,pauseBeforeMs:optional}]}.\nContext turns: ${JSON.stringify(snippet)}\nSources: ${JSON.stringify(compactSources)}`,
+      },
+    ],
+    { temperature: 0.25 },
+  );
+  const replacements = reply.data?.replacements;
+  if (!Array.isArray(replacements) || !replacements.length) {
+    throw new Error('Invalid turn repair: replacements must be a non-empty array');
+  }
+  const nextTurns = script.turns.map((t) => ({ ...t }));
+  const replaced = new Set();
+  for (const r of replacements) {
+    if (!targetIndices.has(r?.index) || replaced.has(r.index)) {
+      throw new Error(`Invalid turn repair: unexpected index ${r?.index}`);
+    }
+    const orig = script.turns[r.index];
+    if (r.speaker !== orig.speaker) {
+      throw new Error(`Invalid turn repair: turn ${r.index} changed speaker`);
+    }
+    if (typeof r.text !== 'string' || !r.text.trim() || r.text.length > 1400) {
+      throw new Error(`Invalid turn repair: turn ${r.index} has invalid text`);
+    }
+    if (!Array.isArray(r.citations) || r.citations.some((id) => !allowedIds.includes(id))) {
+      throw new Error(`Invalid turn repair: turn ${r.index} has invalid citations`);
+    }
+    if (r.segment !== undefined) {
+      throw new Error(`Invalid turn repair: turn ${r.index} must not set segment`);
+    }
+    if (r.ttsText != null && (typeof r.ttsText !== 'string' || r.ttsText.length > 1800)) {
+      throw new Error(`Invalid turn repair: turn ${r.index} has invalid ttsText`);
+    }
+    const updated = {
+      speaker: r.speaker,
+      text: r.text.trim(),
+      citations: r.citations,
+      ...(orig.chapter ? { chapter: orig.chapter } : {}),
+      ...(r.ttsText != null ? { ttsText: r.ttsText } : {}),
+      ...(Number.isInteger(r.pauseBeforeMs) ? { pauseBeforeMs: r.pauseBeforeMs } : {}),
+    };
+    nextTurns[r.index] = updated;
+    replaced.add(r.index);
+  }
+  if (replaced.size !== targetIndices.size) {
+    throw new Error(`Invalid turn repair: expected ${targetIndices.size} replacements, got ${replaced.size}`);
+  }
+  assertScriptQuality({ ...script, turns: nextTurns });
+  return { model: reply.model, turns: nextTurns };
 }

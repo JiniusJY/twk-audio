@@ -20,7 +20,7 @@ import { parseArgs } from "node:util";
 import { cacheKey, readCache, writeCache, pruneCache } from "./cache.mjs";
 import { cachedSpeech, speechIdentity } from "./speech-cache.mjs";
 import { modelConfig } from "./direct-model.mjs";
-import { directPlan, directChapter, directReview } from "./direct-editor.mjs";
+import { directPlan, directChapter, directReview, directRepairTurns } from "./direct-editor.mjs";
 import { assertFreeFish } from "./fish-cost-guard.mjs";
 import { publishPodcastFiles } from "./publish.mjs";
 import { EDITORIAL_VERSION, assertScriptQuality, continuityContext, scriptIdentity } from "./editorial.mjs";
@@ -88,7 +88,7 @@ async function withRetry(fn, { attempts = 3, baseMs = 2000, label = "request", r
       return await fn();
     } catch (error) {
       last = error;
-      const retryable = (!error.status || error.status === 429 || error.status >= 500) || (checkRetry && checkRetry(error));
+      const retryable = !error.auditFailure && ((!error.status || error.status === 429 || error.status >= 500) || (checkRetry && checkRetry(error)));
       if (!retryable || attempt === attempts) throw error;
       let wait = baseMs * 2 ** (attempt - 1);
       if (typeof error.retryAfterMs === "number" && Number.isFinite(error.retryAfterMs) && error.retryAfterMs > 0) {
@@ -687,41 +687,63 @@ async function writeEpisode(episodesRoot) {
     turns: stripRedundantResumePrefix(progress.completed.flatMap(({ turns }) => turns)),
     writerModels: [...new Set([progress.outlineModel, ...progress.completed.map(({ model }) => model)])],
   };
-  const reviewRequest = {
-    action: "review-script", sources: episode.sources, hosts: script.hosts,
-    turns: script.turns, writerModels: script.writerModels,
-  };
-  const reviewKey = cacheKey({
-    schema: EDITORIAL_VERSION,
-    scriptHash: scriptIdentity(script),
-    sourceHash: cacheKey(script.sources),
-  });
-  const cachedReview = !direct || args.fresh
-    ? null
-    : await readCache(CACHE_DIR, "reviews", reviewKey)
-        .then((raw) => (raw ? JSON.parse(raw.toString("utf8")) : null))
-        .catch(() => null);
   let audit;
-  if (
-    cachedReview?.ok === true
-    && cachedReview.reviewedTurns === script.turns.length
-    && cachedReview.reviewerModel
-    && !script.writerModels.includes(cachedReview.reviewerModel)
-  ) {
-    audit = cachedReview;
-    log(`Reused cached editorial review (${audit.reviewerModel}).`);
-  } else {
-    audit = direct
-      ? await withRetry(() => directReview(reviewRequest), {
-          label: "Evidence review",
-          attempts: 3,
-          shouldRetry: (err) => /TimeoutError|aborted due to timeout|Invalid model JSON|expected \d+ audited turns|missing or duplicate turn indices/i.test(String(err?.message || err)),
-        })
-      : await fetchDraft(baseUrl, secret, "", reviewRequest, { attempts: 1 });
-    if (direct && audit?.ok === true) {
-      await writeCache(CACHE_DIR, "reviews", reviewKey, JSON.stringify(audit)).catch((error) => {
-        log(`Review cache write skipped: ${error.code || error.message}`);
+  for (let repairRound = 0; repairRound <= 2; repairRound++) {
+    const reviewRequest = {
+      action: "review-script", sources: episode.sources, hosts: script.hosts,
+      turns: script.turns, writerModels: script.writerModels,
+    };
+    const reviewKey = cacheKey({
+      schema: EDITORIAL_VERSION,
+      scriptHash: scriptIdentity(script),
+      sourceHash: cacheKey(script.sources),
+    });
+    const cachedReview = !direct || args.fresh
+      ? null
+      : await readCache(CACHE_DIR, "reviews", reviewKey)
+          .then((raw) => (raw ? JSON.parse(raw.toString("utf8")) : null))
+          .catch(() => null);
+    if (
+      cachedReview?.ok === true
+      && cachedReview.reviewedTurns === script.turns.length
+      && cachedReview.reviewerModel
+      && !script.writerModels.includes(cachedReview.reviewerModel)
+    ) {
+      audit = cachedReview;
+      log(`Reused cached editorial review (${audit.reviewerModel}).`);
+      break;
+    }
+    try {
+      audit = direct
+        ? await withRetry(() => directReview(reviewRequest), {
+            label: "Evidence review",
+            attempts: 3,
+            shouldRetry: (err) => !err?.auditFailure && /TimeoutError|aborted due to timeout|Invalid model JSON|expected \d+ audited turns|missing or duplicate turn indices/i.test(String(err?.message || err)),
+          })
+        : await fetchDraft(baseUrl, secret, "", reviewRequest, { attempts: 1 });
+      if (direct && audit?.ok === true) {
+        await writeCache(CACHE_DIR, "reviews", reviewKey, JSON.stringify(audit)).catch((error) => {
+          log(`Review cache write skipped: ${error.code || error.message}`);
+        });
+      }
+      break;
+    } catch (err) {
+      const flagged = err?.auditFailure?.unsupportedTurns || [];
+      const issues = err?.auditFailure?.issues || [];
+      if (!direct || repairRound === 2 || (!flagged.length && !issues.length)) {
+        throw err;
+      }
+      log(`Repairing ${flagged.length} flagged turn(s) before re-review (round ${repairRound + 1}/2)...`);
+      const repaired = await directRepairTurns({
+        script,
+        sources: episode.sources,
+        flaggedTurns: flagged,
+        issues,
       });
+      script.turns = repaired.turns;
+      if (repaired.model && !script.writerModels.includes(repaired.model)) {
+        script.writerModels = [...script.writerModels, repaired.model];
+      }
     }
   }
   if (audit.ok !== true || audit.reviewedTurns !== script.turns.length || !audit.reviewerModel || script.writerModels.includes(audit.reviewerModel)) throw new Error("Independent evidence review incomplete; no audio generated");
