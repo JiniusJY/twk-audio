@@ -13,9 +13,13 @@ export async function directJson(config, messages, { exclude = [], fetchImpl = f
   for (const model of eligible) {
     let response;
     try {
+      const payload = {
+        model, messages, temperature: 0.2, max_tokens: 12000,
+        ...(model.startsWith('nvidia/nemotron-3') ? { chat_template_kwargs: { enable_thinking: false } } : {}),
+      };
       response = await fetchImpl(config.base + '/chat/completions', {
         method:'POST', headers:{Authorization:`Bearer ${config.key}`,'Content-Type':'application/json'},
-        body:JSON.stringify({model,messages,temperature:0.2,max_tokens:12000}), signal:AbortSignal.timeout(300000),
+        body:JSON.stringify(payload), signal:AbortSignal.timeout(300000),
       });
     } catch (error) {
       if (error?.name === 'TimeoutError') { lastTimeout = error; continue; }
@@ -26,7 +30,13 @@ export async function directJson(config, messages, { exclude = [], fetchImpl = f
     const data=await response.json();
     const raw=(data.choices?.[0]?.message?.content||'').trim().replace(/<think>[\s\S]*?<\/think>/gi,'').trim().replace(/^```(?:json)?\s*/,'').replace(/\s*```$/,'');
     try {return {model, data:JSON.parse(raw)};}
-    catch {throw new Error('Invalid model JSON; audio blocked.');}
+    catch {
+      const start=raw.indexOf('{'), end=raw.lastIndexOf('}');
+      if (start>=0 && end>start) {
+        try {return {model, data:JSON.parse(raw.slice(start, end+1))};} catch {}
+      }
+      throw new Error('Invalid model JSON; audio blocked.');
+    }
   }
   if (lastTimeout) throw lastTimeout;
   throw new Error('Eligible free models unavailable; job paused without paid fallback.');
