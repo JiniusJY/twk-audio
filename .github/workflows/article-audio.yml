@@ -44,6 +44,7 @@ jobs:
           AUTOMATION_INGEST_SECRET: ${{ secrets.AUTOMATION_INGEST_SECRET }}
           WORKERS: ${{ github.event.inputs.workers || '1' }}
         run: |
+          set -o pipefail
           remaining=$(curl -fsS --retry 3 \
             -H "Authorization: Bearer $AUTOMATION_INGEST_SECRET" \
             "$TWK_AUTOMATION_URL/api/automation/audio?limit=0&voice=bf_emma" | jq -r '.remaining')
