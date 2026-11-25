@@ -651,7 +651,7 @@ async function writeEpisode(episodesRoot) {
     ? await withRetry(() => directReview(reviewRequest), {
         label: "Evidence review",
         attempts: 3,
-        shouldRetry: (err) => /TimeoutError|aborted due to timeout|Invalid model JSON/i.test(String(err?.message || err)),
+        shouldRetry: (err) => /TimeoutError|aborted due to timeout|Invalid model JSON|expected \d+ audited turns|missing or duplicate turn indices/i.test(String(err?.message || err)),
       })
     : await fetchDraft(baseUrl, secret, "", reviewRequest, { attempts: 1 });
   if (audit.ok !== true || audit.reviewedTurns !== script.turns.length || !audit.reviewerModel || script.writerModels.includes(audit.reviewerModel)) throw new Error("Independent evidence review incomplete; no audio generated");
