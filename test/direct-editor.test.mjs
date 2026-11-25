@@ -10,13 +10,15 @@ const claims=[{claim:'Optional AI',sourceId:'src-1',url:'https://vendor.test/lau
 const audit=()=>({issues:[],centralClaims:claims,turns:turns.map((_,index)=>({index,supported:true,sourceIds:['src-1'],reason:'Grounded question'}))});
 const snapshot={slug:'ep-test',episodeNumber:1,title:'Test',hosts:{A:{name:'Jade'},B:{name:'Alok'}},sources,subscribeTurns:[{speaker:'A',text:'Subscribe to this show.',segment:'subscribe',citations:[]}]};
 test('chosen NIM path has no gateway or implicit provider fallback',()=>{
- assert.deepEqual(modelConfig({NVIDIA_API_KEY:'fixture'}).models,['nvidia/nemotron-3-ultra-550b-a55b','z-ai/glm-5.3-flash']);
+ assert.deepEqual(modelConfig({NVIDIA_API_KEY:'fixture'}).models,['nvidia/nemotron-3-ultra-550b-a55b','nvidia/nemotron-3.5-super-vl-120b-a12b']);
  assert.throws(()=>modelConfig({NVIDIA_API_KEY:'fixture',PODCAST_MODEL_BASE_URL:'https://ai-gateway.vercel.sh/v1'}));
  assert.throws(()=>modelConfig({}));
 });
 test('direct model transient errors try eligible same-provider model, auth errors stop',async()=>{
  let calls=0;const r=await directJson(config,[],{fetchImpl:async()=>++calls===1?new Response('',{status:429}):Response.json({choices:[{message:{content:'{"ok":true}'}}]})});
  assert.equal(r.model,'reviewer');assert.equal(calls,2);
+ let tCalls=0;const tRes=await directJson(config,[],{fetchImpl:async()=>{if(++tCalls===1){const e=new Error('timeout');e.name='TimeoutError';throw e;}return Response.json({choices:[{message:{content:'<think>reasoning</think>\n{"ok":true}'}}]});}});
+ assert.equal(tRes.model,'reviewer');assert.equal(tRes.data.ok,true);
  await assert.rejects(()=>directJson(config,[],{fetchImpl:async()=>new Response('',{status:402})}),/no alternate provider/);
  await assert.rejects(()=>directJson(config,[],{exclude:config.models}),/independent/);
 });
