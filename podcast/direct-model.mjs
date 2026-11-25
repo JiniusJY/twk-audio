@@ -12,7 +12,7 @@ export async function directJson(config, messages, { exclude = [], fetchImpl = f
   for (const model of eligible) {
     const response = await fetchImpl(config.base + '/chat/completions', {
       method:'POST', headers:{Authorization:`Bearer ${config.key}`,'Content-Type':'application/json'},
-      body:JSON.stringify({model,messages,temperature:0.2,max_tokens:12000}), signal:AbortSignal.timeout(120000),
+      body:JSON.stringify({model,messages,temperature:0.2,max_tokens:12000}), signal:AbortSignal.timeout(300000),
     });
     if ([429,500,502,503,504].includes(response.status)) { await response.body?.cancel(); continue; }
     if (!response.ok) throw new Error(`Direct model HTTP ${response.status}; no alternate provider or paid fallback.`);

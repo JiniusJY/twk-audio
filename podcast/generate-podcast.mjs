@@ -609,7 +609,13 @@ async function writeEpisode(episodesRoot) {
     action: "review-script", sources: episode.sources, hosts: script.hosts,
     turns: script.turns, writerModels: script.writerModels,
   };
-  const audit = direct ? await directReview(reviewRequest) : await fetchDraft(baseUrl, secret, "", reviewRequest, { attempts: 1 });
+  const audit = direct
+    ? await withRetry(() => directReview(reviewRequest), {
+        label: "Evidence review",
+        attempts: 3,
+        shouldRetry: (err) => /TimeoutError|aborted due to timeout|Invalid model JSON/i.test(String(err?.message || err)),
+      })
+    : await fetchDraft(baseUrl, secret, "", reviewRequest, { attempts: 1 });
   if (audit.ok !== true || audit.reviewedTurns !== script.turns.length || !audit.reviewerModel || script.writerModels.includes(audit.reviewerModel)) throw new Error("Independent evidence review incomplete; no audio generated");
   await writeFile(path.join(outDir, "editorial-review.json"), JSON.stringify({
     schema: EDITORIAL_VERSION, scriptHash: scriptIdentity(script), sourceHash: cacheKey(script.sources),
