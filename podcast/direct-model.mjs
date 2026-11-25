@@ -6,7 +6,7 @@ export function modelConfig(env = process.env) {
   if (models.length < 2 || !env.NVIDIA_API_KEY) throw new Error('Two independent eligible model IDs and direct API credential required.');
   return { base: url.href.replace(/\/$/, ''), models, key: env.NVIDIA_API_KEY };
 }
-export async function directJson(config, messages, { exclude = [], fetchImpl = fetch, temperature = 0.2 } = {}) {
+export async function directJson(config, messages, { exclude = [], fetchImpl = fetch, temperature = 0.2, presencePenalty, frequencyPenalty } = {}) {
   const eligible = config.models.filter(m=>!exclude.includes(m));
   if (!eligible.length) throw new Error('No independent eligible reviewer; audio blocked.');
   let lastTimeout;
@@ -15,6 +15,8 @@ export async function directJson(config, messages, { exclude = [], fetchImpl = f
     try {
       const payload = {
         model, messages, temperature, max_tokens: 12000,
+        ...(presencePenalty !== undefined ? { presence_penalty: presencePenalty } : {}),
+        ...(frequencyPenalty !== undefined ? { frequency_penalty: frequencyPenalty } : {}),
         ...(model.startsWith('nvidia/nemotron-3') ? { chat_template_kwargs: { enable_thinking: false } } : {}),
       };
       response = await fetchImpl(config.base + '/chat/completions', {
